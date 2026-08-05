@@ -218,3 +218,7 @@ COMFYUI_OUTPUT_ROOT = env("COMFYUI_OUTPUT_ROOT", default="")
 LLM_API_BASE_URL = env("LLM_API_BASE_URL", default="")
 LLM_API_KEY = env("LLM_API_KEY", default="")
 LLM_MODEL = env("LLM_MODEL", default="")
+# LLM integration is entirely optional -- when any of the three above are
+# unset, no AI features (refine button, chat) should be offered at all. The
+# frontend reads this via GET /api/config/; see integrations/llm.is_configured().
+LLM_ENABLED = bool(LLM_API_BASE_URL and LLM_API_KEY and LLM_MODEL)

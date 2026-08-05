@@ -127,3 +127,90 @@ class ReferenceAsset(models.Model):
         )
         position = same_kind_ids.index(self.id) + 1 if self.id in same_kind_ids else 1
         return f"{kind_labels[self.kind]} {position}"
+
+
+class PromptChatSession(models.Model):
+    """An interactive conversation helping a user draft/refine a prompt --
+    only ever created when settings.LLM_ENABLED, see generation/api.py.
+    Persisted (rather than kept client-side) so it survives a page refresh
+    and gives an audit trail of LLM usage; resulting_job links it to
+    whatever GenerationJob the final prompt was actually used for, once one
+    exists.
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="prompt_chat_sessions"
+    )
+    mode = models.CharField(max_length=8, choices=Mode.choices)
+    resulting_job = models.ForeignKey(
+        GenerationJob,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="chat_sessions",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self) -> str:
+        return f"PromptChatSession({self.id}, {self.user}, {self.mode})"
+
+
+class PromptChatMessage(models.Model):
+    class Role(models.TextChoices):
+        USER = "user", "User"
+        ASSISTANT = "assistant", "Assistant"
+
+    session = models.ForeignKey(PromptChatSession, on_delete=models.CASCADE, related_name="messages")
+    role = models.CharField(max_length=16, choices=Role.choices)
+    content = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+
+    def __str__(self) -> str:
+        return f"{self.role}: {self.content[:50]}"
+
+
+class BenchmarkResult(models.Model):
+    """One (mode, resolution, duration, steps) data point from
+    manage.py benchmark_render_times -- the raw sweep data used to figure
+    out what's actually viable (and how long it takes) before curating
+    RenderPreset rows from it. Deliberately a separate model from
+    RenderPreset: this can hold many more combinations than you'd ever want
+    to expose to users directly, including ones that failed.
+    """
+
+    class Status(models.TextChoices):
+        OK = "ok", "OK"
+        OOM_ERROR = "oom_error", "OOM / execution error"
+        TIMEOUT = "timeout", "Timed out"
+        CRASHED = "crashed", "ComfyUI unreachable (crashed)"
+
+    mode = models.CharField(max_length=8, choices=Mode.choices)
+    width = models.PositiveIntegerField()
+    height = models.PositiveIntegerField()
+    duration_seconds = models.FloatField()
+    steps = models.PositiveIntegerField()
+
+    status = models.CharField(max_length=16, choices=Status.choices)
+    render_seconds = models.FloatField(null=True, blank=True)
+    error_message = models.TextField(blank=True, default="")
+    comfyui_prompt_id = models.CharField(max_length=64, blank=True, default="")
+    tested_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["mode", "width", "height", "duration_seconds"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["mode", "width", "height", "duration_seconds", "steps"],
+                name="unique_benchmark_combo",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.get_mode_display()} {self.width}x{self.height} {self.duration_seconds}s -> {self.status}"

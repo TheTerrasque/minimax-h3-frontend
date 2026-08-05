@@ -22,7 +22,9 @@ deliberately not built yet.
       object_info_cache/          # cached live /object_info responses it used
     config/                  # settings / urls / wsgi
     accounts/                 # custom User, invite-gated OIDC login
-    generation/                # domain models, admin, health endpoint, job task
+    generation/                # domain models, admin, API views, job task
+      management/commands/
+        benchmark_render_times.py # sweeps ComfyUI real-run capacity/timing
     integrations/               # comfyui.py + llm.py service clients (no models)
   frontend/                # React (Vite + TS)
     Dockerfile                # multi-stage: node build -> nginx
@@ -146,26 +148,119 @@ ones I invite"):
   every job still queued/running, **system-wide** — features.md item 5 wants
   a combined ETA without exposing other users' individual jobs, so this is
   the only cross-user read the API is meant to expose.
-- `tasks.py` — `run_generation_job(job_id)`, the Django-Q2 entry point:
-  mark running → LLM prompt-assist (if not already improved) → load and
-  patch the mode's API-format workflow (prompt, resolution, steps, duration,
-  seed, reference images) → ComfyUI upload/submit/poll/download → save
-  `video_file` → mark done/failed → delete the ComfyUI-side file + clear its
-  history entry. Fully wired for all three modes and dry-run validated
-  against the live containerized DB (mocked ComfyUI upload calls, no real
-  network/GPU cost) — see "Getting the workflows working" below.
-- `api.py`/`urls.py` — only `GET /api/health/` exists so far, to prove
-  SPA → nginx → Django wiring end to end.
+- `PromptChatSession`/`PromptChatMessage` — a persisted, multi-turn
+  conversation helping a user draft/refine a prompt (features.md: "a way to
+  interactively chat with the llm"). Only ever created when
+  `settings.LLM_ENABLED`; `resulting_job` optionally links a finished
+  session to whatever `GenerationJob` its prompt was actually used for.
+  Persisted (rather than kept client-side) so a session survives a page
+  refresh and gives an audit trail of LLM usage.
+- `BenchmarkResult` — one `(mode, width, height, duration_seconds, steps) →
+  status/render_seconds` data point from `manage.py benchmark_render_times`
+  (see "Benchmarking render times" below). Deliberately separate from
+  `RenderPreset`: this holds the full raw sweep (including combinations that
+  failed), not the small curated set actually offered to users.
+- `queue.py` — `estimated_seconds_ahead()`: sum of `estimated_seconds` over
+  every job still queued/running, **system-wide** — features.md item 5 wants
+  a combined ETA without exposing other users' individual jobs, so this is
+  the only cross-user read the API is meant to expose.
+- `tasks.py` — `run_generation_job(job_id)`, the Django-Q2 entry point: mark
+  running → build the mode's API-format workflow via `build_api_workflow()`
+  (prompt, resolution, steps, duration, seed, reference images) → ComfyUI
+  upload/submit/poll/download → save `video_file` → mark done/failed →
+  delete the ComfyUI-side file + clear its history entry. No LLM call
+  happens here — prompt refinement is an explicit pre-job user action (see
+  below), and `job.improved_prompt` already holds its result (or is blank)
+  by the time this task runs. `build_api_workflow()` is a pure function
+  (given already-uploaded ComfyUI filenames, no DB/network I/O) so it's
+  shared between this and the benchmark command without needing fake DB
+  rows. Fully wired for all three modes and dry-run validated against the
+  live containerized DB (mocked ComfyUI upload calls, no real network/GPU
+  cost) — see "Getting the workflows working" below.
+- `api.py`/`urls.py` — `GET /api/health/`, `GET /api/config/` (feature
+  flags, currently just `llm_enabled`), `POST /api/prompt/refine/`
+  (one-shot "AI refine"), and the chat endpoints
+  (`POST /api/prompt/chat/sessions/`, `GET .../sessions/{id}/`,
+  `POST .../sessions/{id}/messages/`). Full CRUD for presets/jobs/references
+  still doesn't exist — see "Deferred" below.
 
 **`integrations`** (plain packages, no models/migrations):
 
 - `comfyui.py` — real implementation of upload / queue / poll / download /
-  extract-output / delete-output / clear-history, following
-  `resources/COMFYUI_API_GUIDE.md` §5–§10 exactly. Doesn't know about any
-  specific workflow's node ids — callers own the API-format JSON.
+  extract-output / delete-output / clear-history / error-status-detection /
+  reachability-check, following `resources/COMFYUI_API_GUIDE.md` §5–§10.
+  Doesn't know about any specific workflow's node ids — callers own the
+  API-format JSON. `check_for_error()` and `is_alive()` exist specifically
+  so a prompt that ComfyUI accepted but then failed server-side (e.g. an
+  OOM it caught itself) surfaces as a clear error instead of a confusing
+  `KeyError` reaching into an unpopulated `outputs` dict, and so the
+  benchmark command can tell a slow-but-alive server apart from a crashed one.
 - `llm.py` — OpenAI-compatible chat-completion client; loads the right guide
   from `resources/prompt instructions/` per mode (base guide for t2v/i2v, the
-  reference guide for r2v) as system context.
+  reference guide for r2v) as system context. `is_configured()` backs
+  `settings.LLM_ENABLED`. Two entry points: `improve_prompt()` (one-shot
+  rewrite) and `chat_reply()` (multi-turn, given the full prior history).
+
+## LLM integration: entirely optional, two features when present
+
+Per features.md: **no LLM configured → no AI UI at all.**
+`settings.LLM_ENABLED` (`config/settings.py`) is `True` only when
+`LLM_API_BASE_URL`/`LLM_API_KEY`/`LLM_MODEL` are all set; the frontend is
+meant to check `GET /api/config/`'s `llm_enabled` once at boot and hide the
+refine button/chat entirely when it's `False`. Even hit directly, the
+refine/chat endpoints fail cleanly with `503` rather than crashing when
+unconfigured (verified). There is deliberately no automatic/implicit LLM
+call anywhere in the job-execution path — refinement only happens when a
+user explicitly asks for it:
+
+- **"AI refine" button** → `POST /api/prompt/refine/` → `llm.improve_prompt()`
+  → one-shot rewrite, same behavior as before this pass.
+- **Interactive chat** → `POST /api/prompt/chat/sessions/` to start,
+  `POST .../messages/` per turn → `llm.chat_reply()` with the full
+  conversation history, system-prompted to converse and help draft a
+  prompt rather than immediately rewriting one. Persisted via
+  `PromptChatSession`/`PromptChatMessage` (see above) — the "persisted vs.
+  stateless" call made for this pass.
+
+Both were dry-run tested against the live containerized DB and Postgres
+(mocked only the outbound LLM HTTP call): config correctly reports
+`llm_enabled: false` when unset; refine/chat correctly `503` when unset;
+with a mocked LLM configured, refine returns a rewritten prompt, a chat
+session round-trips a user message → assistant reply → full history
+fetch, and cross-user access to another user's session correctly `404`s
+rather than leaking it.
+
+## Benchmarking render times
+
+`RenderPreset.estimated_render_seconds` is currently a rough, unbenchmarked
+guess (see its seed migration). `manage.py benchmark_render_times` sweeps
+`(resolution, duration)` combinations per mode against the **real** ComfyUI
+instance and records what happened into `BenchmarkResult` — the matrix you'd
+actually curate `RenderPreset` rows from. It:
+
+- Submits real jobs via the same `build_api_workflow()` `tasks.py` uses (no
+  fake DB rows needed, since that function is pure).
+- Measures wall-clock render time on success.
+- Distinguishes a **clean server-side failure** (ComfyUI caught an error,
+  e.g. OOM, and reported it via `/history` — `comfyui.check_for_error()`)
+  from ComfyUI's **whole process dying**, which the user has observed happen
+  in practice on large combinations, not just a graceful per-job error. The
+  former records `oom_error` and moves to the next combination; the latter
+  (detected via `is_alive()` before each attempt, and via a connection
+  error mid-request) records `crashed` and **stops the command immediately**
+  rather than continuing to hammer a dead server.
+- Is resumable: already-recorded combinations are skipped on a re-run
+  (`--retest` to force) — so after a crash, restart ComfyUI and re-run the
+  same command to pick up where it left off.
+- Sorts combinations cheapest-first (by `width × height × duration`) and
+  defaults to a small built-in spread; both are overridable via
+  `--resolution`/`--duration`/`--modes`/`--steps`.
+
+**This is never run automatically by anything in this project** — it spends
+real GPU time and, per the above, can crash the ComfyUI process. It's a
+tool to run deliberately; its `--help` output and argument parsing were
+verified this pass, but it has **not** been run for real yet (same reason
+as the live ComfyUI test below — the GPU server was busy).
 
 ## Getting the workflows working: UI-format → API-format
 
@@ -217,13 +312,19 @@ yet); i2v's first/last-frame assignment currently uses a plain convention
 1. Browser hits `/invite/<token>/` (first-time users) or the OIDC login
    directly (existing users / trusted-provider auto-accept) → session
    cookie set on success.
-2. SPA calls `GET /api/presets/` to show mode/resolution/duration options
+2. SPA calls `GET /api/config/` to decide whether to show any AI UI at all.
+3. SPA calls `GET /api/presets/` to show mode/resolution/duration options
    with estimated render time, and `GET /api/queue-estimate/` before the
    user confirms — both not yet implemented (see below).
-3. `POST /api/jobs/` creates a `GenerationJob`, snapshotting
-   `estimated_seconds` from the chosen `RenderPreset`, and enqueues
-   `generation.tasks.run_generation_job` via Django-Q2.
-4. The task runs the ComfyUI round trip (§ above) and updates job status;
+4. While drafting a prompt, the user may click "AI refine"
+   (`POST /api/prompt/refine/`, one-shot) or open the chat
+   (`POST /api/prompt/chat/sessions/` + `.../messages/`, multi-turn) — both
+   already implemented, just not wired to any UI yet.
+5. `POST /api/jobs/` creates a `GenerationJob` (raw + optionally the
+   AI-refined prompt from step 4), snapshotting `estimated_seconds` from the
+   chosen `RenderPreset`, and enqueues `generation.tasks.run_generation_job`
+   via Django-Q2 — not yet implemented, see "Deferred" below.
+6. The task runs the ComfyUI round trip (§ above) and updates job status;
    the SPA polls `GET /api/jobs/{id}/` for progress.
 
 ## Verification done so far vs. still outstanding
@@ -245,13 +346,16 @@ asking first; do that before trusting this in front of real users.
 
 Intentionally not built in this pass:
 
-- **A real live ComfyUI test** — see directly above.
-- **Full DRF viewsets/serializers** for presets, jobs, references,
-  queue-estimate, and prompt-improve — only `GET /api/health/` exists, so
-  there's no way to actually trigger a `GenerationJob` yet except from a
-  Django shell.
+- **A real live ComfyUI test, and a real `benchmark_render_times` run** —
+  see above; both deliberately not done without asking first (real GPU
+  time), and the GPU server was busy this pass.
+- **Full DRF viewsets/serializers** for presets, jobs, references, and
+  queue-estimate — `config`/`prompt/refine`/`prompt/chat/*` exist (see
+  "LLM integration" above), but there's still no way to actually trigger a
+  `GenerationJob` except from a Django shell.
 - **React screens** — `src/features/{auth,generate,queue}/` are placeholder
-  files marking where they go; no UI is built yet.
+  files marking where they go; no UI is built yet, including for the LLM
+  refine/chat endpoints above.
 - **r2v's `ref_video_N`/`ref_audio_N`/`ref_video_audio_N`** — only
   `ref_image_N` is wired; see "Getting the workflows working" above.
 - **i2v's first/last-frame role** — inferred from `ReferenceAsset.order`

@@ -21,6 +21,12 @@ class ComfyUIError(RuntimeError):
     """Raised for ComfyUI API failures, including per-node validation errors."""
 
 
+class ComfyUIExecutionError(ComfyUIError):
+    """Raised when a queued prompt reached /history but finished with an
+    error status (e.g. a CUDA OOM caught server-side) rather than crashing
+    the connection outright. See check_for_error()."""
+
+
 @dataclass
 class ComfyUIOutput:
     filename: str
@@ -77,6 +83,34 @@ def wait_for_result(
             return history[prompt_id]
         time.sleep(poll_seconds)
     raise TimeoutError(f"ComfyUI prompt {prompt_id} did not finish within {timeout}s")
+
+
+def check_for_error(history_record: dict[str, Any]) -> None:
+    """Raises ComfyUIExecutionError if the prompt finished with an error
+    status (e.g. an out-of-memory error caught by ComfyUI itself rather than
+    crashing the process/connection -- see benchmark_render_times).
+
+    Call this right after wait_for_result() and before extract_video_output()
+    -- a failed prompt has no populated outputs, so skipping this check turns
+    into a confusing KeyError instead of a clear error message.
+    """
+    status = history_record.get("status", {})
+    if status.get("status_str") != "error":
+        return
+    error_messages = [m[1] for m in status.get("messages", []) if m[0] == "execution_error"]
+    detail = error_messages[-1] if error_messages else status
+    raise ComfyUIExecutionError(f"ComfyUI execution failed: {detail}")
+
+
+def is_alive(timeout: float = 5.0) -> bool:
+    """Cheap reachability check (GET /system_stats) -- used to tell a
+    genuinely crashed/unreachable ComfyUI process apart from a prompt that's
+    just still running. See benchmark_render_times."""
+    try:
+        resp = requests.get(f"{_base_url()}/system_stats", timeout=timeout)
+        return resp.status_code == 200
+    except requests.exceptions.RequestException:
+        return False
 
 
 def extract_video_output(history_record: dict[str, Any], node_id: str) -> ComfyUIOutput:

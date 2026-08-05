@@ -73,13 +73,57 @@ ComfyUI submission (actual render, real GPU time) has **not** been run yet —
 skipped this session because the GPU server was busy. Do that before
 trusting this in front of real users.
 
+## Third pass: benchmark matrix + optional LLM (refine button + chat)
+
+- [x] `BenchmarkResult` model (separate from `RenderPreset` — raw sweep data,
+      not curated user-facing offerings) + `manage.py benchmark_render_times`:
+      sweeps (resolution, duration) per mode against real ComfyUI, records
+      render time or failure, tells a clean per-job OOM apart from ComfyUI's
+      whole process crashing (observed in practice) and stops immediately on
+      the latter rather than hammering a dead server, resumable
+      (already-tested combos skipped unless `--retest`). **Not run for
+      real yet** — same GPU-time caution as the live test above; verified
+      via `--help`/argparse only.
+- [x] `integrations/comfyui.py` gained `check_for_error()` (a prompt that
+      reached `/history` but failed server-side, e.g. OOM, now surfaces as a
+      clear error instead of a confusing `KeyError`) and `is_alive()`
+      (reachability check) — used by both the benchmark command and now also
+      `generation/tasks.py`'s real job path (same bug existed there too).
+- [x] `settings.LLM_ENABLED` (true only when `LLM_API_BASE_URL`/`LLM_API_KEY`/
+      `LLM_MODEL` are all set) + `GET /api/config/` exposing it, so the
+      frontend can hide all AI UI when no LLM is configured. Endpoints
+      degrade gracefully (503, not a crash) even if hit directly while unset.
+- [x] Removed the automatic LLM call from `run_generation_job` — refinement
+      is now purely an explicit pre-job action (see below), never implicit.
+- [x] `POST /api/prompt/refine/` (one-shot "AI refine" button, existing
+      `llm.improve_prompt()` wired to an endpoint).
+- [x] Interactive chat, persisted (per the "persisted vs. stateless"
+      decision): `PromptChatSession`/`PromptChatMessage` models,
+      `llm.chat_reply()` (multi-turn, conversational system prompt distinct
+      from the one-shot rewrite prompt), `POST /api/prompt/chat/sessions/`,
+      `GET .../sessions/{id}/`, `POST .../sessions/{id}/messages/`.
+- [x] `generation/tasks.py` refactored: `build_api_workflow()` pulled out as
+      a pure function (given already-uploaded filenames, no DB/network I/O)
+      so both `run_generation_job` and the benchmark command share the exact
+      same patching logic — re-verified against real DB after the refactor.
+- [x] Dry-run tested against the live containerized DB + Postgres (only the
+      outbound LLM HTTP call and ComfyUI upload mocked): config flag
+      correct in both states, refine/chat correctly 503 when unset, full
+      chat round-trip (create session → message → assistant reply → history
+      fetch) works when mocked-enabled, cross-user session access correctly
+      404s instead of leaking, refactored workflow-builder still produces
+      valid wiring for all 3 modes.
+- [x] Updated `ARCHITECTURE.md` with all of the above.
+
 ## Still outstanding (next pass)
 
 - A real live end-to-end ComfyUI test (queue → render → download → cleanup)
-- Full DRF viewsets/serializers (presets, jobs, references, queue-estimate,
-  prompt-improve) — only `GET /api/health/` exists; no way to trigger a
-  `GenerationJob` yet except from a Django shell
-- React screens — `src/features/{auth,generate,queue}/` are placeholders
+- A real `benchmark_render_times` run to actually populate the matrix and
+  inform real `RenderPreset.estimated_render_seconds` values
+- Full DRF viewsets/serializers (presets, jobs, references, queue-estimate)
+  — no way to trigger a `GenerationJob` yet except from a Django shell
+- React screens — `src/features/{auth,generate,queue}/` are placeholders,
+  including for the now-implemented refine/chat endpoints
 - r2v's `ref_video_N`/`ref_audio_N`/`ref_video_audio_N` (only `ref_image_N`
   is wired)
 - i2v's first/last-frame role is inferred from `ReferenceAsset.order`
