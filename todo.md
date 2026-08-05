@@ -115,6 +115,28 @@ trusting this in front of real users.
       valid wiring for all 3 modes.
 - [x] Updated `ARCHITECTURE.md` with all of the above.
 
+## Fourth pass: docs pass + auto-generated API documentation
+
+- [x] Added a root `README.md`: quick start, accounts/invites explainer,
+      full config option reference table, verified command examples
+      (caught and fixed a wrong relative-path example in the process),
+      project structure pointer.
+- [x] Fixed doc drift in `ARCHITECTURE.md` (a duplicated bullet, a stale
+      reference to the refactored-away `_patch_workflow`) and added the
+      `check_for_error()`/`is_alive()` patterns to
+      `resources/COMFYUI_API_GUIDE.md` as general guidance.
+- [x] Added `drf-spectacular`: auto-generated OpenAPI schema (`/api/schema/`)
+      + Swagger UI (`/api/schema/swagger-ui/`) + Redoc
+      (`/api/schema/redoc/`), all browsable without login. Every view in
+      `generation/api.py` now carries an `@extend_schema` with an inline
+      documentation-only `Serializer` (the views themselves still validate
+      by hand, per that file's minimal-scope decision) so the generated
+      docs actually describe request/response shapes instead of being
+      empty. Verified: `manage.py spectacular` generates with zero
+      warnings, and schema/Swagger UI both serve correctly through the
+      full stack (nginx → backend) — chosen over a hand-written reference
+      specifically so it can't drift as jobs/presets/references get added.
+
 ## Still outstanding (next pass)
 
 - A real live end-to-end ComfyUI test (queue → render → download → cleanup)

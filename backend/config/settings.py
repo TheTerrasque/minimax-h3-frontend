@@ -39,6 +39,7 @@ INSTALLED_APPS = [
     "django.contrib.sites",
     # third-party
     "rest_framework",
+    "drf_spectacular",
     "django_q",
     "allauth",
     "allauth.account",
@@ -189,6 +190,20 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
     ],
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+}
+
+# drf-spectacular -- auto-generated OpenAPI schema + browsable docs (see
+# config/urls.py: /api/schema/, /api/schema/swagger-ui/, /api/schema/redoc/).
+# Generated from the actual views, so it can't drift from reality the way
+# hand-written API docs would; views use @extend_schema (generation/api.py)
+# to describe request/response bodies since they're plain @api_view
+# functions with manual dict validation, not DRF Serializers.
+SPECTACULAR_SETTINGS = {
+    "TITLE": "MinimaxH3 Front API",
+    "DESCRIPTION": "Backend API for the MiniMax H3 ComfyUI video-generation frontend.",
+    "VERSION": "0.1.0",
+    "SERVE_INCLUDE_SCHEMA": False,
 }
 
 

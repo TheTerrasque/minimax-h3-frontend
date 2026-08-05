@@ -178,7 +178,9 @@ ones I invite"):
   (one-shot "AI refine"), and the chat endpoints
   (`POST /api/prompt/chat/sessions/`, `GET .../sessions/{id}/`,
   `POST .../sessions/{id}/messages/`). Full CRUD for presets/jobs/references
-  still doesn't exist — see "Deferred" below.
+  still doesn't exist — see "Deferred" below. Every view carries an
+  `@extend_schema` (drf-spectacular) describing its request/response shape
+  for the auto-generated API docs — see "API documentation" below.
 
 **`integrations`** (plain packages, no models/migrations):
 
@@ -196,6 +198,29 @@ ones I invite"):
   reference guide for r2v) as system context. `is_configured()` backs
   `settings.LLM_ENABLED`. Two entry points: `improve_prompt()` (one-shot
   rewrite) and `chat_reply()` (multi-turn, given the full prior history).
+
+## API documentation
+
+Auto-generated via `drf-spectacular`, not hand-written — it's built from the
+actual views, so it can't drift out of sync with reality the way a
+maintained-by-hand reference would as new endpoints (jobs/presets/
+references) get added later.
+
+- `GET /api/schema/` — the raw OpenAPI 3.0 schema.
+- `GET /api/schema/swagger-ui/` — interactive Swagger UI (try requests
+  directly from the browser).
+- `GET /api/schema/redoc/` — Redoc's read-focused rendering of the same schema.
+
+All three are browsable without logging in (the schema isn't sensitive) even
+though the endpoints it documents require session auth to actually call.
+Every view in `generation/api.py` carries an `@extend_schema` with an inline
+`Serializer` describing its request/response shape — these serializers exist
+purely for documentation, since the views themselves still do lightweight
+manual `request.data` validation rather than using DRF serializers for real
+(see that file's module docstring). Verified this pass: `manage.py
+spectacular` generates cleanly (no warnings), and `/api/schema/` +
+`/api/schema/swagger-ui/` both serve correctly through the full stack
+(nginx → backend).
 
 ## LLM integration: entirely optional, two features when present
 

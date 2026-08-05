@@ -33,7 +33,11 @@ docker compose up -d --build
 
 That builds and starts everything (Postgres, migrations, Django, the
 Django-Q2 worker, and the nginx-fronted frontend) and serves the app at
-**http://localhost:8080/**.
+**http://localhost:8080/**. Since there's no frontend UI yet (see
+"Status" above), the API is what you'd actually poke at — browse
+**http://localhost:8080/api/schema/swagger-ui/** for interactive,
+auto-generated docs of every endpoint (log in via `/accounts/login/` first,
+in another tab, since the endpoints themselves require a session).
 
 First-time setup, once the stack is up:
 
