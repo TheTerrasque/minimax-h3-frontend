@@ -236,8 +236,42 @@ def wait_for_result(base_url: str, prompt_id: str, poll_seconds: float = 3.0, ti
 ```
 
 Video generation is slow (minutes) — pick a generous `timeout` and a Celery `soft_time_limit` to
-match. `history[prompt_id]["status"]` tells you if it errored (check `status.status_str` /
-`status.messages` for an `execution_error` entry) vs completed normally.
+match.
+
+**Check for a server-side failure before touching `outputs`.** A prompt ComfyUI accepted at
+`POST /prompt` time can still fail during execution (an OOM it caught itself, a bad reference
+asset, etc.) — `wait_for_result()` above returns as soon as *anything* lands in `/history` for
+that `prompt_id`, success or failure alike. Skipping this check turns a clear failure into a
+confusing `KeyError` reaching into an `outputs` dict that was never populated:
+
+```python
+def check_for_error(history_record: dict) -> None:
+    status = history_record.get("status", {})
+    if status.get("status_str") != "error":
+        return
+    error_messages = [m[1] for m in status.get("messages", []) if m[0] == "execution_error"]
+    detail = error_messages[-1] if error_messages else status
+    raise RuntimeError(f"ComfyUI execution failed: {detail}")
+
+history = wait_for_result(base_url, prompt_id)
+check_for_error(history)  # raises before you ever look at history["outputs"]
+```
+
+**Telling "still rendering" apart from "the whole ComfyUI process died."** A `requests.get`
+inside the poll loop naturally raises `requests.exceptions.ConnectionError`/`Timeout` if the
+server itself goes away mid-poll (crashed, not just slow) — that propagates straight out of
+`wait_for_result()` already. If you're doing something that might push ComfyUI into a hard crash
+rather than a caught OOM (e.g. sweeping unknown resolution/duration combinations to find the
+limit), check reachability before each attempt too, so you fail fast with a clear message instead
+of retrying against a dead server:
+
+```python
+def is_alive(base_url: str, timeout: float = 5.0) -> bool:
+    try:
+        return requests.get(f"{base_url}/system_stats", timeout=timeout).status_code == 200
+    except requests.exceptions.RequestException:
+        return False
+```
 
 If you do want live progress (e.g. to drive a progress bar via Django Channels), connect
 `ws://<host>:<port>/ws?clientId=<client_id>` with `websocket-client` instead and read JSON frames;

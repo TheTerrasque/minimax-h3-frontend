@@ -144,10 +144,6 @@ ones I invite"):
   `resources/prompt instructions/VIDEO_PROMPT_WRITING_GUIDE_ref_en.md`, so
   the frontend can offer "insert reference" buttons producing tokens the LLM
   prompt-assist step already understands.
-- `queue.py` — `estimated_seconds_ahead()`: sum of `estimated_seconds` over
-  every job still queued/running, **system-wide** — features.md item 5 wants
-  a combined ETA without exposing other users' individual jobs, so this is
-  the only cross-user read the API is meant to expose.
 - `PromptChatSession`/`PromptChatMessage` — a persisted, multi-turn
   conversation helping a user draft/refine a prompt (features.md: "a way to
   interactively chat with the llm"). Only ever created when
@@ -331,16 +327,20 @@ yet); i2v's first/last-frame assignment currently uses a plain convention
 
 `generation/tasks.py` has been dry-run tested end-to-end for all three modes
 against the live containerized Postgres DB: real `RenderPreset`/
-`GenerationJob`/`ReferenceAsset` rows, `_load_api_workflow` +
-`_patch_workflow` run for real, only `integrations.comfyui.upload_media`
-mocked (so no network/GPU cost) — confirmed correct node wiring and valid,
-well-formed JSON for t2v (plain text), i2v (first *and* last frame, which
-requires dynamically adding a node the template doesn't have), and r2v
-(three dynamically-added reference images replacing the template's example
-wiring, prompt correctly landing on its separate `PrimitiveStringMultiline`
-node). **Not yet done**: an actual live submission to ComfyUI (queue →
-render → download) — costs real GPU time, deliberately not spent without
-asking first; do that before trusting this in front of real users.
+`GenerationJob`/`ReferenceAsset` rows, `_build_workflow_for_job()` (which
+calls the pure `build_api_workflow()`) run for real, only
+`integrations.comfyui.upload_media` mocked (so no network/GPU cost) —
+confirmed correct node wiring and valid, well-formed JSON for t2v (plain
+text), i2v (first *and* last frame, which requires dynamically adding a
+node the template doesn't have), and r2v (three dynamically-added reference
+images replacing the template's example wiring, prompt correctly landing on
+its separate `PrimitiveStringMultiline` node) — re-confirmed after the
+`build_api_workflow()` extraction refactor. Also dry-run tested: `/api/config/`,
+`/api/prompt/refine/`, and the full chat session flow (see "LLM integration"
+above). **Not yet done**: an actual live submission to ComfyUI (queue →
+render → download) or a real `benchmark_render_times` run — both cost real
+GPU time, deliberately not spent without asking first; do that before
+trusting this in front of real users.
 
 ## Deferred to the next pass
 
