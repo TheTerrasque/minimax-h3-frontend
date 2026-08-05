@@ -1,0 +1,18 @@
+[project]
+name = "mm-h3-backend"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.12"
+dependencies = [
+    "cryptography>=50.0.0",
+    "django>=6.0.8",
+    "django-allauth>=65.18.0",
+    "django-environ>=0.14.0",
+    "django-q2>=1.10.0",
+    "djangorestframework>=3.17.2",
+    "gunicorn>=26.0.0",
+    "psycopg[binary]>=3.3.4",
+    "pyjwt>=2.13.0",
+    "requests>=2.34.2",
+    "whitenoise>=6.12.0",
+]

@@ -7,10 +7,14 @@ supply reference images/audio/video and first/last frames where each workflow su
 retrieve the finished video, and avoid leaving a permanent copy sitting on the ComfyUI machine
 after the app has downloaded it.
 
-Written from web research + direct inspection of this repo's own workflow files (Aug 2026).
-Always sanity-check against the live server's `/object_info/<NodeClass>` when wiring this up —
-node schemas do change between ComfyUI releases, and the MiniMax H3 nodes here are custom nodes
-whose exact input list you should re-verify against the running server before shipping.
+Written from web research + direct inspection of this repo's own workflow files, cross-checked
+against live `/object_info` responses from this project's actual ComfyUI instance (Aug 2026). That
+instance is a portable ComfyUI 0.30.0 install on a separate networked GPU machine (`gpusun`, RTX
+3090), reachable at `http://gpusun:8188` — not literally "ComfyUI Desktop" despite this doc's
+title, though the API itself is identical either way. Always sanity-check against the live
+server's `/object_info/<NodeClass>` when wiring this up if you're pointed at a different ComfyUI
+instance — node schemas do change between ComfyUI releases, and the MiniMax H3 nodes here are
+custom nodes.
 
 ## 1. Connecting
 
@@ -82,6 +86,15 @@ Do this once per workflow and commit the exported API-format JSON so your Django
 script-friendly template to load (`json.load`) and mutate at runtime (prompt text, seed,
 `filename_prefix`, reference assets) before POSTing.
 
+**This project does this differently:** instead of the manual UI export above,
+`backend/scripts/export_workflow_api.py` reimplements ComfyUI's export mechanically from a UI-format
+workflow + live `/object_info` responses (handles the subgraph flattening and dynamic
+reference-list inputs described below). Its docstring documents exactly how each serialization rule
+was verified. The three workflows' exported output already lives in
+[`resources/workflows_api/`](./workflows_api/) — re-run the script if a workflow in
+`resources/workflows/` changes. `generation/tasks.py` patches the resulting JSON's node ids
+directly; see `ARCHITECTURE.md`'s "Getting the workflows working" section for the full picture.
+
 ## 4. What each workflow supports, and where reference media plugs in
 
 All three route through a MiniMax H3 sampler node, but the node differs per workflow and that's
@@ -91,7 +104,7 @@ what determines which extra assets you can feed in.
 |---|---|---|
 | `video_minimax_h3_t2v.json` | `MiniMaxH3ImageToVideo` | none connected — text only |
 | `video_minimax_h3_i2v.json` | `MiniMaxH3ImageToVideo` | `first_frame`, optional `last_frame` (both `IMAGE`) |
-| `video_minimax_h3_r2v.json` | `MiniMaxH3ReferenceToVideo` | up to 3 `ref_image_N`, `ref_video_N`, `ref_video_audio_N`, `ref_audio_N` |
+| `video_minimax_h3_r2v.json` | `MiniMaxH3ReferenceToVideo` | up to 9 `ref_image_N`; up to 3 each of `ref_video_N`, `ref_video_audio_N`, `ref_audio_N` |
 
 ### t2v / i2v — `MiniMaxH3ImageToVideo`
 
@@ -121,32 +134,38 @@ Inputs (from the exported API JSON): `clip`, `vae`, `first_frame` (`IMAGE`, opti
 
 ### r2v — `MiniMaxH3ReferenceToVideo`
 
-This node takes **lists** of reference assets using numbered socket names (`_0`, `_1`, `_2`, ...) —
-this project's `r2v` workflow wires two of them:
+This node takes **dynamic lists** of reference assets (ComfyUI's `COMFY_AUTOGROW_V3` input type) —
+confirmed directly against this project's live `GET /object_info/MiniMaxH3ReferenceToVideo`:
 
-- `ref_images.ref_image_0`, `ref_image_1`, `ref_image_2` — up to 3 reference **images** (`IMAGE`).
-  Used for subject/style/character references the video should be based on.
-- `ref_videos.ref_video_0` — a reference **video**. In the exported graph this socket is typed
-  `IMAGE`, which suggests it expects a single representative frame pulled from your reference video
-  (e.g. via a `LoadVideo` + a frame-extraction node) rather than the raw video file — confirm the
-  exact expected type against `GET /object_info/MiniMaxH3ReferenceToVideo` on your running server
-  before assuming, since this is a custom node and may vary by version.
-- `ref_video_audios.ref_video_audio_0` — the **audio track** belonging to a reference video
-  (`AUDIO`).
-- `ref_audios.ref_audio_0` — a standalone reference **audio** clip (`AUDIO`), independent of any
-  reference video (e.g. a voice or music reference).
+- `ref_images.ref_image_0` .. `ref_image_8` — up to **9** reference **images** (`IMAGE`, each
+  downscaled to a 2048px short edge if larger, never upscaled). Used for subject/style/character
+  references the video should be based on. This project's saved `r2v` workflow wires 2 of them as
+  an example.
+- `ref_videos.ref_video_0` .. `ref_video_2` — up to **3** reference **videos**. Confirmed typed
+  `IMAGE` server-side (tooltip: "Reference video frames at 24 fps (2-15s)") — it wants a frame
+  sequence, not a raw video file; feed it via a `LoadVideo` + frame-extraction node, not `LoadVideo`
+  directly.
+- `ref_video_audios.ref_video_audio_0` .. `ref_video_audio_2` — up to **3**, each the **audio
+  track** (`AUDIO`) belonging to the same-numbered `ref_video_N`.
+- `ref_audios.ref_audio_0` .. `ref_audio_2` — up to **3** standalone reference **audio** clips
+  (`AUDIO`), independent of any reference video (e.g. a voice or music reference).
 - `prompt`, `width`, `height`, `length` — same shape as the i2v node.
-- A trailing widget (`"match"` in this project's saved file) is a resize/crop mode combo controlling
-  how output dimensions relate to the reference media — check the node's combo options via
-  `/object_info` if you need to change it.
+- `ref_image_size` (combo: `"match"` | `"max"`) — resize mode for how reference images relate to
+  the generation's output dimensions. `"match"` scales each ref down (never up) to the generation's
+  pixel area; `"max"` uses a fixed 2048px short edge for best identity fidelity but runs several
+  times slower (reference tokens ride through every sampling step).
 
-The `_0`/`_1`/`_2` sockets are a fixed set exposed by the custom node's UI (not something you can
-invent more of in raw JSON) — if you need a 4th reference image, that requires the node to support
-it; check `/object_info/MiniMaxH3ReferenceToVideo`'s `input` schema first.
+The API inputs dict key for each materialized list item is the literal dotted name shown above
+(e.g. `"ref_images.ref_image_0"`, not a bare `"ref_image_0"`) — confirmed directly from saved
+workflow JSON, where ComfyUI itself records that exact string as the input's `name`. The min/max
+counts per group are enforced by the node's own schema (not something you can exceed in raw JSON) —
+re-check `/object_info/MiniMaxH3ReferenceToVideo` if a future ComfyUI/node-pack version might have
+changed them.
 
 To feed `ref_video_N` / `ref_audio_N` / `ref_video_audio_N`, use ComfyUI's core `LoadVideo` /
 `LoadAudio` nodes (outputting `VIDEO`/`AUDIO`) the same way `LoadImage` is used for `ref_image_N` —
-upload the file first (see §5), then set that node's filename widget to the uploaded name.
+upload the file first (see §5), then set that node's filename widget to the uploaded name. (Not yet
+implemented in this project's `generation/tasks.py` — only `ref_image_N` is wired so far.)
 
 ## 5. Uploading media (images, audio, video) — all through one endpoint
 
@@ -312,6 +331,11 @@ rather than hoping for one:
   installed on that remote server and tested against your ComfyUI version, not a guarantee.
 
 ## 11. Putting it together — a Celery task sketch
+
+(This project actually uses Django-Q2, not Celery — see `generation/tasks.py`'s
+`run_generation_job` for the real, current implementation with confirmed node ids for all three
+modes. The sketch below is left as generic illustrative reference for the request/response shape;
+the concrete task-queue mechanics differ.)
 
 ```python
 import json

@@ -1,0 +1,13 @@
+# Build context for backend/Dockerfile is the repo root (see
+# docker-compose.yml) -- keep it small and avoid baking host-local junk in.
+.git/
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/*.pyc
+backend/db.sqlite3
+backend/staticfiles/
+backend/media/
+frontend/node_modules/
+frontend/dist/
+.env
