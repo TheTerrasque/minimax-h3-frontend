@@ -1,0 +1,723 @@
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import {
+  useChatReply,
+  useConfig,
+  useCreateJob,
+  usePresets,
+  useQueueEstimate,
+  useRefinePrompt,
+} from "../../api/queries";
+import {
+  MODE_LABELS,
+  type ChatMessage,
+  type GenerationJobDetail,
+  type Mode,
+  type ReferenceAsset,
+} from "../../api/types";
+import { parseChatMessage } from "./chatMarkdown";
+
+const MODES: Mode[] = ["t2v", "i2v", "r2v"];
+
+// Mirrors generation/api.py's _MAX_REFERENCE_IMAGES/_MAX_REFERENCE_AUDIO --
+// what tasks.py actually wires into the ComfyUI workflow per mode (see
+// ARCHITECTURE.md).
+const MAX_REFERENCE_IMAGES: Record<Mode, number> = { t2v: 0, i2v: 2, r2v: 9 };
+const MAX_REFERENCE_AUDIO: Record<Mode, number> = { t2v: 0, i2v: 0, r2v: 3 };
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = Math.round(seconds % 60);
+  return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
+}
+
+function presetLabel(preset: { label: string; megapixels: number; is_draft: boolean }): string {
+  return `${preset.label} (${preset.megapixels}MP${preset.is_draft ? ", draft" : ""})`;
+}
+
+// Creates an object URL for a locally-staged file (thumbnail preview before
+// upload) and revokes it on change/unmount -- object URLs otherwise leak for
+// the page's lifetime.
+function useObjectUrl(file: File | null): string | null {
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!file) {
+      setUrl(null);
+      return;
+    }
+    const objectUrl = URL.createObjectURL(file);
+    setUrl(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [file]);
+  return url;
+}
+
+function useObjectUrls(files: File[]): string[] {
+  const [urls, setUrls] = useState<string[]>([]);
+  useEffect(() => {
+    const objectUrls = files.map((f) => URL.createObjectURL(f));
+    setUrls(objectUrls);
+    return () => {
+      for (const u of objectUrls) URL.revokeObjectURL(u);
+    };
+  }, [files]);
+  return urls;
+}
+
+function hasUrl(r: ReferenceAsset): r is ReferenceAsset & { url: string } {
+  return r.url != null;
+}
+
+// Re-downloads an already-uploaded reference (used by "Redo") and repacks
+// it as a File -- a browser has no way to hand back the original File
+// object for something already uploaded, but the bytes are still sitting
+// at their (same-origin, session-cookie-authed) media URL, so refetching
+// them is the only way to actually restore it rather than leaving the
+// slot empty.
+async function fetchAsFile(ref: ReferenceAsset & { url: string }): Promise<File> {
+  const resp = await fetch(ref.url, { credentials: "include" });
+  if (!resp.ok) throw new Error(`Failed to fetch ${ref.url}: ${resp.status}`);
+  const blob = await resp.blob();
+  const filename = ref.url.split("/").pop()?.split("?")[0] || ref.label;
+  return new File([blob], filename, { type: blob.type });
+}
+
+interface GenerateScreenProps {
+  redoJob: GenerationJobDetail | null;
+  onRedoConsumed: () => void;
+}
+
+export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps) {
+  const config = useConfig();
+
+  const [mode, setMode] = useState<Mode>("t2v");
+  const presets = usePresets(mode);
+  const [presetId, setPresetId] = useState<number | null>(null);
+  const [durationId, setDurationId] = useState<number | null>(null);
+  const [aspectRatio, setAspectRatio] = useState<string | null>(null);
+  // Set by a "Redo" action (see JobModal) while waiting for `mode`'s presets
+  // to load, so the matching preset/duration can be resolved once they do --
+  // see the two effects below.
+  const [pendingRedoDurationId, setPendingRedoDurationId] = useState<number | null>(null);
+
+  const [rawPrompt, setRawPrompt] = useState("");
+  const [improvedPrompt, setImprovedPrompt] = useState("");
+
+  const [firstFrame, setFirstFrame] = useState<File | null>(null);
+  const [lastFrame, setLastFrame] = useState<File | null>(null);
+  // Bumped on removal to force the (uncontrolled) file input to remount --
+  // otherwise its native DOM value stays set after we clear firstFrame/
+  // lastFrame, so re-picking the same file again wouldn't fire onChange.
+  const [firstFrameKey, setFirstFrameKey] = useState(0);
+  const [lastFrameKey, setLastFrameKey] = useState(0);
+  const [refImages, setRefImages] = useState<File[]>([]);
+  const [referenceAudio, setReferenceAudio] = useState<File[]>([]);
+
+  const [chatOpen, setChatOpen] = useState(false);
+  const chatLogRef = useRef<HTMLDivElement>(null);
+  // Which redo's async reference-restore is currently "live" -- see the
+  // redo effect below. Not a plain cleanup-based cancel flag: calling
+  // onRedoConsumed() sets the redoJob prop back to null as part of the
+  // very same effect run, which would otherwise look identical to the
+  // effect being superseded and cancel the restore before its fetches
+  // even resolve.
+  const activeRedoIdRef = useRef<number | null>(null);
+  // Entirely client-side -- never persisted until (if) the job it drafted
+  // actually gets queued, see handleSubmit's chatTranscript. Refreshing the
+  // page loses an unqueued chat, by design (a user request: no DB trail for
+  // chat content that doesn't end up backing a real job).
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState("");
+
+  const refinePrompt = useRefinePrompt();
+  const chatReply = useChatReply();
+  const createJob = useCreateJob();
+
+  // Keep the chat log scrolled to the latest message/typing indicator --
+  // otherwise "AI is typing" feedback can end up below the fold, invisible.
+  useEffect(() => {
+    const el = chatLogRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [chatMessages, chatReply.isPending]);
+
+  // Reset mode-specific state whenever the mode changes -- a preset/reference
+  // picked for one mode isn't meaningful for another. (aspectRatio is NOT
+  // mode-specific -- it's preserved across a mode switch.)
+  useEffect(() => {
+    setPresetId(null);
+    setDurationId(null);
+    setFirstFrame(null);
+    setLastFrame(null);
+    setRefImages([]);
+    setReferenceAudio([]);
+    setChatOpen(false);
+    setChatMessages([]);
+  }, [mode]);
+
+  // "Redo" (see JobModal): reload the same mode/ratio/prompt, flag which
+  // duration to resolve to once that mode's presets have (re)loaded, and
+  // re-fetch the job's reference files from their (already-uploaded) media
+  // URLs -- a File object itself can't be recovered client-side, but its
+  // bytes are still sitting at ref.url, so re-downloading them and
+  // repacking as a fresh File actually restores the slot instead of
+  // leaving it empty.
+  useEffect(() => {
+    if (!redoJob) return;
+    setMode(redoJob.mode);
+    setAspectRatio(redoJob.aspect_ratio);
+    setRawPrompt(redoJob.raw_prompt);
+    setImprovedPrompt(redoJob.improved_prompt || "");
+    setPendingRedoDurationId(redoJob.duration_id);
+
+    const redoId = redoJob.id;
+    activeRedoIdRef.current = redoId;
+    (async () => {
+      const images = redoJob.references.filter((r) => r.kind === "image").filter(hasUrl);
+      const audioRefs = redoJob.references.filter((r) => r.kind === "audio").filter(hasUrl);
+      images.sort((a, b) => a.order - b.order);
+      audioRefs.sort((a, b) => a.order - b.order);
+
+      try {
+        if (redoJob.mode === "i2v") {
+          const [first, last] = images;
+          const [firstFile, lastFile] = await Promise.all([
+            first ? fetchAsFile(first) : null,
+            last ? fetchAsFile(last) : null,
+          ]);
+          if (activeRedoIdRef.current !== redoId) return; // superseded by a newer redo
+          setFirstFrame(firstFile);
+          setLastFrame(lastFile);
+        } else if (redoJob.mode === "r2v") {
+          const [imageFiles, audioFiles] = await Promise.all([
+            Promise.all(images.map(fetchAsFile)),
+            Promise.all(audioRefs.map(fetchAsFile)),
+          ]);
+          if (activeRedoIdRef.current !== redoId) return; // superseded by a newer redo
+          setRefImages(imageFiles);
+          setReferenceAudio(audioFiles);
+        }
+      } catch (err) {
+        // Best-effort: if a reference can't be re-fetched for some reason,
+        // leave that slot empty rather than blocking the rest of the redo.
+        console.error("Redo: failed to restore a reference file", err);
+      }
+    })();
+
+    onRedoConsumed();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-run when a new redo job arrives
+  }, [redoJob]);
+
+  // Default to the first non-draft preset (megapixels tier) once presets
+  // load -- skipped while a redo resolution is pending (that one picks a
+  // specific preset instead, see below).
+  useEffect(() => {
+    if (presetId != null || !presets.data?.length || pendingRedoDurationId != null) return;
+    const preferred = presets.data.find((p) => !p.is_draft) ?? presets.data[0];
+    setPresetId(preferred.id);
+  }, [presets.data, presetId, pendingRedoDurationId]);
+
+  // Resolve a pending redo once this mode's presets have loaded: find the
+  // tier that actually offers the requested duration.
+  useEffect(() => {
+    if (pendingRedoDurationId == null || !presets.data?.length) return;
+    const match = presets.data.find((p) => p.durations.some((d) => d.id === pendingRedoDurationId));
+    if (match) {
+      setPresetId(match.id);
+      setDurationId(pendingRedoDurationId);
+    }
+    setPendingRedoDurationId(null);
+  }, [pendingRedoDurationId, presets.data]);
+
+  const selectedPreset = presets.data?.find((p) => p.id === presetId) ?? null;
+  const durations = selectedPreset?.durations ?? [];
+
+  // Tracks the last-selected clip length in seconds -- separate from
+  // durationId because once the preset (tier) changes, `durations` below
+  // is already the *new* tier's list, which the *old* durationId was never
+  // a member of; looking the old id up in the new array (an earlier bug)
+  // always came back empty and silently fell back to the tier's first
+  // option instead of actually preserving the user's chosen length.
+  const lastDurationSecondsRef = useRef<number | null>(null);
+
+  // Keeps the selected duration valid whenever the available list changes
+  // (preset/tier switch, or a redo landing on a tier that doesn't offer
+  // the exact id it targeted): keeps the same clip length if the new tier
+  // offers it, otherwise picks the *nearest* available length rather than
+  // always resetting to the tier's first (shortest) option.
+  useEffect(() => {
+    if (!durations.length) return;
+    const current = durations.find((d) => d.id === durationId);
+    if (current) {
+      lastDurationSecondsRef.current = current.duration_seconds;
+      return;
+    }
+    const target = lastDurationSecondsRef.current;
+    const next =
+      target == null
+        ? durations[0]
+        : durations.reduce((best, d) =>
+            Math.abs(d.duration_seconds - target) < Math.abs(best.duration_seconds - target) ? d : best,
+          );
+    lastDurationSecondsRef.current = next.duration_seconds;
+    setDurationId(next.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- durations is a fresh array each render
+  }, [durations, durationId]);
+
+  // Default the aspect ratio once config loads.
+  useEffect(() => {
+    if (aspectRatio != null || !config.data) return;
+    setAspectRatio(config.data.default_aspect_ratio);
+  }, [config.data, aspectRatio]);
+
+  const queueEstimate = useQueueEstimate(durationId);
+
+  const referenceImages = useMemo<File[]>(() => {
+    if (mode === "i2v") return [firstFrame, lastFrame].filter((f): f is File => f != null);
+    if (mode === "r2v") return refImages;
+    return [];
+  }, [mode, firstFrame, lastFrame, refImages]);
+
+  const referenceLabels = useMemo(() => {
+    const imageLabels = referenceImages.map((_, i) => `Picture ${i + 1}`);
+    const audioLabels = mode === "r2v" ? referenceAudio.map((_, i) => `Audio ${i + 1}`) : [];
+    return [...imageLabels, ...audioLabels];
+  }, [referenceImages, referenceAudio, mode]);
+
+  const firstFrameUrl = useObjectUrl(firstFrame);
+  const lastFrameUrl = useObjectUrl(lastFrame);
+  const refImageUrls = useObjectUrls(refImages);
+
+  function insertToken(token: string) {
+    setRawPrompt((prev) => (prev.trim() ? `${prev.trim()} ${token}` : token));
+  }
+
+  async function handleRefine() {
+    if (!rawPrompt.trim()) return;
+    const result = await refinePrompt.mutateAsync({ mode, rawPrompt, referenceLabels });
+    setImprovedPrompt(result.improved_prompt);
+  }
+
+  function handleOpenChat() {
+    setChatOpen(true);
+  }
+
+  async function handleSendChat() {
+    if (!chatInput.trim()) return;
+    const content = chatInput.trim();
+    const history = chatMessages; // prior turns only -- the backend appends `content` itself
+    setChatMessages((prev) => [...prev, { role: "user", content }]);
+    setChatInput("");
+    try {
+      const reply = await chatReply.mutateAsync({
+        mode,
+        history,
+        content,
+        rawPrompt,
+        referenceLabels,
+        referenceImages: config.data?.llm_vision_enabled ? referenceImages : undefined,
+      });
+      setChatMessages((prev) => [...prev, reply]);
+    } catch {
+      // chatReply.isError reflects this -- see the chat panel's error message.
+    }
+  }
+
+  function handleRemoveFirstFrame() {
+    setFirstFrame(null);
+    setFirstFrameKey((k) => k + 1);
+  }
+
+  function handleRemoveLastFrame() {
+    setLastFrame(null);
+    setLastFrameKey((k) => k + 1);
+  }
+
+  function handleRemoveRefImage(index: number) {
+    setRefImages((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  function handleRemoveRefAudio(index: number) {
+    setReferenceAudio((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (!durationId || !aspectRatio || !rawPrompt.trim()) return;
+    // Queuing just adds the job to the always-visible QueueSidebar (it
+    // reactively refetches via useCreateJob's cache invalidation) -- no
+    // modal, no navigation; the user stays on the form to queue another.
+    await createJob.mutateAsync({
+      mode,
+      durationId,
+      aspectRatio,
+      rawPrompt,
+      improvedPrompt: improvedPrompt || undefined,
+      referenceImages,
+      referenceAudio: mode === "r2v" ? referenceAudio : undefined,
+      chatTranscript: chatMessages.length ? chatMessages : undefined,
+    });
+    setRawPrompt("");
+    setImprovedPrompt("");
+    setFirstFrame(null);
+    setLastFrame(null);
+    setRefImages([]);
+    setReferenceAudio([]);
+    setChatOpen(false);
+    setChatMessages([]);
+  }
+
+  const maxImages = MAX_REFERENCE_IMAGES[mode];
+  const maxAudio = MAX_REFERENCE_AUDIO[mode];
+  const canSubmit =
+    Boolean(durationId) && Boolean(aspectRatio) && rawPrompt.trim().length > 0 && !createJob.isPending;
+  const selectedDuration = durations.find((d) => d.id === durationId) ?? null;
+  const selectedDurationIndex = selectedDuration ? durations.indexOf(selectedDuration) : 0;
+
+  return (
+    <section className="generate-screen">
+      <div className="tab-strip content-tabs" role="tablist" aria-label="Content type">
+        <button type="button" className="tab selected" aria-selected="true">
+          Video
+        </button>
+        <button type="button" className="tab" disabled title="Coming soon">
+          Image
+        </button>
+        <button type="button" className="tab" disabled title="Coming soon">
+          Audio
+        </button>
+      </div>
+
+      <div className="tab-strip mode-tabs" role="tablist" aria-label="Generation mode">
+        {MODES.map((m) => (
+          <button
+            key={m}
+            type="button"
+            className={`tab ${mode === m ? "selected" : ""}`}
+            aria-selected={mode === m}
+            onClick={() => setMode(m)}
+          >
+            {MODE_LABELS[m]}
+          </button>
+        ))}
+      </div>
+
+      <form onSubmit={handleSubmit} className="generate-form">
+        <div className="toolbar">
+          {presets.isError && <p className="error">Couldn't load presets.</p>}
+          <label className="toolbar-control">
+            <span>Quality</span>
+            <select
+              value={presetId ?? ""}
+              onChange={(e) => setPresetId(Number(e.target.value))}
+              disabled={!presets.data?.length}
+            >
+              {presets.data?.map((preset) => (
+                <option key={preset.id} value={preset.id}>
+                  {presetLabel(preset)}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="toolbar-control">
+            <span>Aspect ratio</span>
+            <select
+              value={aspectRatio ?? ""}
+              onChange={(e) => setAspectRatio(e.target.value)}
+              disabled={!config.data?.aspect_ratios.length}
+            >
+              {config.data?.aspect_ratios.map((ratio) => (
+                <option key={ratio.value} value={ratio.value}>
+                  {ratio.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="toolbar-control toolbar-control-wide">
+            <span>
+              Length: {selectedDuration ? `${selectedDuration.duration_seconds}s` : "—"}
+              {selectedDuration && (
+                <> (~{formatDuration(selectedDuration.estimated_render_seconds)} to render)</>
+              )}
+            </span>
+            <input
+              type="range"
+              min={0}
+              max={Math.max(durations.length - 1, 0)}
+              step={1}
+              value={selectedDurationIndex}
+              disabled={durations.length < 2}
+              onChange={(e) => setDurationId(durations[Number(e.target.value)]?.id ?? null)}
+            />
+          </label>
+        </div>
+
+        {mode === "i2v" && (
+          <fieldset>
+            <legend>Reference frames</legend>
+            <div className="reference-row">
+              <div className="file-slot">
+                <label>
+                  First frame
+                  <input
+                    key={firstFrameKey}
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => setFirstFrame(e.target.files?.[0] ?? null)}
+                  />
+                </label>
+                {firstFrameUrl && (
+                  <div className="ref-thumb-row">
+                    <img src={firstFrameUrl} className="ref-thumb" alt="First frame preview" />
+                    <button type="button" onClick={handleRemoveFirstFrame}>
+                      Remove
+                    </button>
+                  </div>
+                )}
+              </div>
+              <div className="file-slot">
+                <label>
+                  Last frame (optional)
+                  <input
+                    key={lastFrameKey}
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => setLastFrame(e.target.files?.[0] ?? null)}
+                  />
+                </label>
+                {lastFrameUrl && (
+                  <div className="ref-thumb-row">
+                    <img src={lastFrameUrl} className="ref-thumb" alt="Last frame preview" />
+                    <button type="button" onClick={handleRemoveLastFrame}>
+                      Remove
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </fieldset>
+        )}
+
+        {mode === "r2v" && (
+          <>
+            <fieldset>
+              <legend>
+                Reference images ({refImages.length}/{maxImages})
+              </legend>
+              <p className="hint">Add images, then insert their token into your prompt.</p>
+              {refImages.length > 0 && (
+                <ul className="reference-list">
+                  {refImages.map((file, i) => (
+                    <li key={i} className="reference-item">
+                      {refImageUrls[i] && (
+                        <img src={refImageUrls[i]} className="ref-thumb-sm" alt="" />
+                      )}
+                      <span>
+                        Picture {i + 1}: {file.name}
+                      </span>
+                      <button type="button" onClick={() => insertToken(`<Picture ${i + 1}>`)}>
+                        Insert token
+                      </button>
+                      <button type="button" onClick={() => handleRemoveRefImage(i)}>
+                        Remove
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {refImages.length < maxImages && (
+                <label className="file-slot">
+                  Add reference image
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) setRefImages((prev) => [...prev, file]);
+                      e.target.value = "";
+                    }}
+                  />
+                </label>
+              )}
+            </fieldset>
+
+            <fieldset>
+              <legend>
+                Reference audio ({referenceAudio.length}/{maxAudio})
+              </legend>
+              <p className="hint">Add audio clips, then insert their token into your prompt.</p>
+              {referenceAudio.length > 0 && (
+                <ul className="reference-list">
+                  {referenceAudio.map((file, i) => (
+                    <li key={i} className="reference-item">
+                      <span>
+                        Audio {i + 1}: {file.name}
+                      </span>
+                      <button type="button" onClick={() => insertToken(`<Audio ${i + 1}>`)}>
+                        Insert token
+                      </button>
+                      <button type="button" onClick={() => handleRemoveRefAudio(i)}>
+                        Remove
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {referenceAudio.length < maxAudio && (
+                <label className="file-slot">
+                  Add reference audio
+                  <input
+                    type="file"
+                    accept="audio/*"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) setReferenceAudio((prev) => [...prev, file]);
+                      e.target.value = "";
+                    }}
+                  />
+                </label>
+              )}
+            </fieldset>
+          </>
+        )}
+
+        <fieldset className="prompt-fieldset">
+          <legend>Prompt</legend>
+          <textarea
+            className="prompt-input"
+            rows={10}
+            autoFocus
+            value={rawPrompt}
+            onChange={(e) => setRawPrompt(e.target.value)}
+            placeholder="Describe the video you want…"
+          />
+          {config.data?.llm_enabled && (
+            <div className="prompt-actions">
+              <button
+                type="button"
+                onClick={handleRefine}
+                disabled={refinePrompt.isPending || !rawPrompt.trim()}
+              >
+                {refinePrompt.isPending ? "Refining…" : "AI refine"}
+              </button>
+              <button type="button" onClick={handleOpenChat} disabled={chatOpen}>
+                {chatOpen ? "Chat open" : "Chat with AI"}
+              </button>
+            </div>
+          )}
+          {refinePrompt.isError && <p className="error">AI refine failed. Try again.</p>}
+
+          {improvedPrompt && (
+            <div className="improved-prompt">
+              <p className="hint">
+                AI-refined version — this is what will actually be rendered unless you discard it:
+              </p>
+              <p className="improved-prompt-text">{improvedPrompt}</p>
+              <div className="prompt-actions">
+                <button type="button" onClick={() => setRawPrompt(improvedPrompt)}>
+                  Edit as raw prompt
+                </button>
+                <button type="button" onClick={() => setImprovedPrompt("")}>
+                  Discard
+                </button>
+              </div>
+            </div>
+          )}
+        </fieldset>
+
+        {chatOpen && (
+          <fieldset className="chat-panel">
+            <legend>Prompt chat</legend>
+            <div className="chat-log" ref={chatLogRef}>
+              {chatMessages.map((m, i) => {
+                if (m.role === "user") {
+                  return (
+                    <div key={i} className="chat-message chat-user">
+                      <strong>You:</strong> {m.content}
+                    </div>
+                  );
+                }
+                const { text, finalPrompt } = parseChatMessage(m.content);
+                return (
+                  <div key={i} className="chat-message chat-assistant">
+                    <strong>AI:</strong>
+                    {text && (
+                      <div className="chat-markdown">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+                      </div>
+                    )}
+                    {finalPrompt ? (
+                      <div className="final-prompt-card">
+                        <p className="hint">Suggested prompt:</p>
+                        <pre className="final-prompt-text">{finalPrompt}</pre>
+                        <button type="button" onClick={() => setImprovedPrompt(finalPrompt)}>
+                          Use as AI-refined prompt
+                        </button>
+                      </div>
+                    ) : (
+                      <button type="button" onClick={() => setImprovedPrompt(m.content)}>
+                        Use as AI-refined prompt
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+              {chatReply.isPending && (
+                <div className="chat-message chat-assistant chat-typing">
+                  <strong>AI:</strong>
+                  <span className="typing-dots" aria-label="AI is typing">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                  </span>
+                </div>
+              )}
+            </div>
+            {chatReply.isError && <p className="error">Message failed to send. Try again.</p>}
+            <div className="chat-input-row">
+              <input
+                type="text"
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                placeholder="Ask the AI to help draft your prompt…"
+                disabled={chatReply.isPending}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void handleSendChat();
+                  }
+                }}
+              />
+              <button
+                type="button"
+                onClick={handleSendChat}
+                disabled={chatReply.isPending || !chatInput.trim()}
+              >
+                {chatReply.isPending ? "Sending…" : "Send"}
+              </button>
+            </div>
+          </fieldset>
+        )}
+
+        {queueEstimate.data && (
+          <p className="hint">
+            This render: ~{formatDuration(queueEstimate.data.additional_seconds)}.{" "}
+            {queueEstimate.data.seconds_ahead > 0
+              ? `Ahead of you in the queue: ~${formatDuration(queueEstimate.data.seconds_ahead)}.`
+              : "Queue is empty."}{" "}
+            Estimated done by {new Date(queueEstimate.data.estimated_finish_time).toLocaleTimeString()}.
+          </p>
+        )}
+
+        {createJob.isError && <p className="error">Couldn't queue that job. Try again.</p>}
+
+        <button type="submit" className="button button-primary" disabled={!canSubmit}>
+          {createJob.isPending ? "Queuing…" : "Queue video"}
+        </button>
+      </form>
+    </section>
+  );
+}
