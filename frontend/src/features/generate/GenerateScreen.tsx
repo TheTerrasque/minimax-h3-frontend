@@ -726,7 +726,7 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
                         <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
                       </div>
                     )}
-                    {finalPrompt ? (
+                    {finalPrompt && (
                       <div className="final-prompt-card">
                         <p className="hint">Suggested prompt:</p>
                         <pre className="final-prompt-text">{finalPrompt}</pre>
@@ -734,10 +734,6 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
                           Use as AI-refined prompt
                         </button>
                       </div>
-                    ) : (
-                      <button type="button" onClick={() => setImprovedPrompt(m.content)}>
-                        Use as AI-refined prompt
-                      </button>
                     )}
                   </div>
                 );
