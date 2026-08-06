@@ -24,10 +24,17 @@ from django.conf import settings
 from integrations import hooks
 
 # r2v uses the multi-reference rewrite format; t2v/i2v share the base guide.
+# Image/audio modes reuse the underlying t2v/r2v prompt structure verbatim
+# (see generation/models.py's Mode docstring -- they render through the
+# same workflows) so they share the same guide as their flow's video mode.
 _GUIDE_FILENAMES = {
     "t2v": "VIDEO_PROMPT_WRITING_GUIDE_base_en.md",
     "i2v": "VIDEO_PROMPT_WRITING_GUIDE_base_en.md",
     "r2v": "VIDEO_PROMPT_WRITING_GUIDE_ref_en.md",
+    "t2i": "VIDEO_PROMPT_WRITING_GUIDE_base_en.md",
+    "r2i": "VIDEO_PROMPT_WRITING_GUIDE_ref_en.md",
+    "t2a": "VIDEO_PROMPT_WRITING_GUIDE_base_en.md",
+    "r2a": "VIDEO_PROMPT_WRITING_GUIDE_ref_en.md",
 }
 
 

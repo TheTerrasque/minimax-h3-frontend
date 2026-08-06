@@ -34,6 +34,8 @@ from rest_framework.response import Response
 from integrations import llm
 
 from .models import (
+    CONTENT_TYPE_BY_MODE,
+    ContentType,
     GenerationJob,
     Mode,
     PromptChatMessage,
@@ -234,6 +236,12 @@ class CreateJobRequestSerializer(serializers.Serializer):
 class GenerationJobSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     mode = serializers.ChoiceField(choices=Mode.choices)
+    content_type = serializers.ChoiceField(
+        choices=ContentType.choices,
+        help_text="Derived from mode (see models.CONTENT_TYPE_BY_MODE) -- which of "
+        "video_url's actual content (video/image/audio) the frontend should render "
+        "it as; despite the field name, it's not always a video.",
+    )
     status = serializers.ChoiceField(choices=GenerationJob.Status.choices)
     raw_prompt = serializers.CharField(
         help_text="Included at list level (not just detail) so the frontend can show a "
@@ -456,20 +464,34 @@ def chat_message(request):
 # takes none, i2v takes first/last frame (2), r2v takes up to 9 (per live
 # /object_info's ref_images autogrow max, see ARCHITECTURE.md). Video
 # references aren't wired into tasks.py yet, so they're rejected here too
-# rather than accepted and silently ignored at render time.
+# rather than accepted and silently ignored at render time. t2i/t2a share
+# t2v's underlying workflow (text flow, no references at all); r2i/r2a
+# share r2v's (reference flow, same limits).
 _MAX_REFERENCE_IMAGES = {
     Mode.TEXT_TO_VIDEO: 0,
     Mode.IMAGE_TO_VIDEO: 2,
     Mode.REFERENCE_TO_VIDEO: 9,
+    Mode.TEXT_TO_IMAGE: 0,
+    Mode.REFERENCE_TO_IMAGE: 9,
+    Mode.TEXT_TO_AUDIO: 0,
+    Mode.REFERENCE_TO_AUDIO: 9,
 }
 
 # Max standalone reference audio clips -- only MiniMaxH3ReferenceToVideo has
 # a ref_audios input at all (see live /object_info: COMFY_AUTOGROW_V3,
-# prefix "ref_audio_", max 3), so t2v/i2v get 0.
+# prefix "ref_audio_", max 3), so t2v/i2v get 0. r2i (image output) also
+# gets 0 -- reference audio would render into the underlying video same as
+# r2v, but a still frame extracted from it can't carry any of that, so
+# offering the upload would just be confusing. r2a keeps the full 3 -- a
+# reference clip actually can (and is meant to) shape the generated audio.
 _MAX_REFERENCE_AUDIO = {
     Mode.TEXT_TO_VIDEO: 0,
     Mode.IMAGE_TO_VIDEO: 0,
     Mode.REFERENCE_TO_VIDEO: 3,
+    Mode.TEXT_TO_IMAGE: 0,
+    Mode.REFERENCE_TO_IMAGE: 0,
+    Mode.TEXT_TO_AUDIO: 0,
+    Mode.REFERENCE_TO_AUDIO: 3,
 }
 
 
@@ -508,6 +530,7 @@ def _serialize_job(
     data = {
         "id": job.id,
         "mode": job.mode,
+        "content_type": CONTENT_TYPE_BY_MODE[job.mode],
         "status": job.status,
         "raw_prompt": job.raw_prompt,
         "preset_id": job.preset_id,
@@ -634,6 +657,14 @@ def jobs(request):
     preset = duration.preset
 
     aspect_ratio = request.data.get("aspect_ratio")
+    if CONTENT_TYPE_BY_MODE[mode] == ContentType.AUDIO:
+        # Audio jobs always render at the minimum 32x32 (see resolution's
+        # "1:1" -> RESOLUTION_MULTIPLE floor) -- visual output is discarded
+        # entirely (see _postprocess_output()), so an aspect ratio choice
+        # would be meaningless; force it server-side rather than trusting
+        # the frontend to not send one (it doesn't show the picker for
+        # audio modes, but this is the actual boundary).
+        aspect_ratio = "1:1"
     if not is_valid_aspect_ratio(aspect_ratio):
         return Response(
             {
