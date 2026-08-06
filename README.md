@@ -1,15 +1,25 @@
 # MinimaxH3 Front
 
-A friendly, invite-only web frontend for generating video with the MiniMax H3
-ComfyUI workflows (text-to-video, image-to-video, reference-to-video), plus
-experimental image and audio generation (t2i/r2i/t2a/r2a — derived from the
-video workflows by extracting a frame or the audio track, see "Updating the
-ComfyUI workflows" below) — see
-[`resources/features.md`](resources/features.md) for the full product brief.
+A friendly web app for generating AI video — plus, experimentally, images
+and audio — with the MiniMax H3 models. **It's a frontend, not a renderer:**
+it needs an existing [ComfyUI](https://www.comfy.org/) server to actually do
+the generating. This project just gives you (and anyone you invite) a
+clean, simple web page to use it from — type a prompt, pick a quality
+level, hit render, watch it show up in your queue — instead of wiring up
+ComfyUI's node-graph editor by hand every time.
 
-Django (API backend) + React (SPA) + Django-Q2 (background job queue),
-talking to an existing ComfyUI instance, all behind a single nginx entrypoint
-via Docker Compose.
+![The Generate screen: prompt box, quality/aspect-ratio/length controls, and a live queue sidebar](resources/screenshots/generate-desktop.png)
+
+<details>
+<summary>It's comfortable on a phone too</summary>
+<br>
+<img src="resources/screenshots/generate-mobile.png" alt="The Generate screen on a phone" width="320">
+</details>
+
+Under the hood: Django (API backend) + React (SPA) + Django-Q2 (background
+job queue), talking to that ComfyUI instance, all behind a single nginx
+entrypoint via Docker Compose — see
+[`resources/features.md`](resources/features.md) for the full product brief.
 
 **Status:** end-to-end working, including a real render. The backend
 (accounts/invites, the full `GenerationJob` create/list/detail/delete +
@@ -36,43 +46,56 @@ chronological log of this project's setup.
 
 ## Quick start
 
-Requires Docker + Docker Compose, and a running ComfyUI instance reachable
-from wherever Docker runs (see [`resources/COMFYUI_API_GUIDE.md`](resources/COMFYUI_API_GUIDE.md)
-for how that API works; ComfyUI itself is **not** part of this stack).
+You'll need:
+
+- Docker + Docker Compose
+- A running [ComfyUI](https://www.comfy.org/) instance, reachable from
+  wherever Docker runs (see
+  [`resources/COMFYUI_API_GUIDE.md`](resources/COMFYUI_API_GUIDE.md) for how
+  that connection works) — ComfyUI itself is **not** part of this stack,
+  you bring your own
+
+**1. Configure it.**
 
 ```sh
 cp .env.example .env
-# edit .env -- at minimum set DJANGO_SECRET_KEY, POSTGRES_PASSWORD, and
-# COMFYUI_BASE_URL (see "Configuration" below)
+```
 
+Open `.env` and set at least `DJANGO_SECRET_KEY`, `POSTGRES_PASSWORD`, and
+`COMFYUI_BASE_URL` (everything else has a working default — see
+[Configuration](#configuration) below for the full list).
+
+**2. Start it.**
+
+```sh
 docker compose up -d --build
 ```
 
-That builds and starts everything (Postgres, migrations, Django, the
-Django-Q2 worker, and the nginx-fronted frontend) and serves the app at
-**http://localhost:8080/** — the React SPA itself (log in, pick a mode,
-queue a video, watch it in the queue). For interactive, auto-generated docs
-of every endpoint instead, browse
-**http://localhost:8080/api/schema/swagger-ui/** (log in via
-`/accounts/login/` first, in another tab, since the endpoints themselves
-require a session).
+This builds and starts everything — Postgres, migrations, Django, the
+Django-Q2 worker, and the nginx-fronted frontend — and serves the app at
+**http://localhost:8080/**.
 
-First-time setup, once the stack is up:
+**3. Create your admin account.**
 
 ```sh
-# create yourself an admin account
 docker compose exec backend python manage.py createsuperuser
-
-# then log into /admin/ with it to:
-#  - review/adjust RenderPreset rows (per-mode megapixels/steps quality
-#    tiers, e.g. Draft/Standard/High quality) and their RenderDuration rows
-#    (per-tier selectable clip lengths, each with its own estimated render
-#    time) -- a starter set per mode is already seeded by migration, with
-#    rough unbenchmarked estimated_render_seconds guesses; tune these once
-#    you've run manage.py benchmark_render_times for real
-#  - create an Invite (its shareable URL is /invite/<token>/) for anyone
-#    else who should get an account -- see "Accounts & invites" below
 ```
+
+Log into `/admin/` with it to:
+
+- review/adjust the quality presets (`RenderPreset`/`RenderDuration` rows —
+  per-mode quality tiers like Draft/Standard/High and their selectable clip
+  lengths). A reasonable starter set is already seeded, with rough
+  unbenchmarked render-time estimates you can refine later via
+  `manage.py benchmark_render_times`.
+- create an [Invite](#accounts--invites) for anyone else who should get an
+  account — its shareable URL is `/invite/<token>/`
+
+**That's it.** Open **http://localhost:8080/**, log in, and start queuing
+renders. (For interactive, auto-generated API docs instead, there's also
+**http://localhost:8080/api/schema/swagger-ui/** — log in via
+`/accounts/login/` first, in another tab, since the endpoints require a
+session.)
 
 ## Accounts & invites
 
