@@ -3,8 +3,10 @@
 Talks to any OpenAI-compatible /chat/completions endpoint (configured in
 Django settings, not hardcoded to one provider). Uses the guides in
 "resources/prompt instructions/" as system context so the rewritten prompt
-follows MiniMax H3's expected structure (shot timelines, <Picture N>/<Video
-N>/<Audio N> reference labels, etc).
+follows MiniMax H3's expected structure -- shot timelines and <Picture N>/
+<Video N>/<Audio N> reference labels for video; much simpler single-scene
+(image) or sound-only (audio) guides for the two modes that discard most
+of that same underlying video render, see _GUIDE_FILENAMES below.
 
 LLM integration is entirely optional -- see settings.LLM_ENABLED and
 is_configured() below. Callers (generation/api.py) must check that before
@@ -16,6 +18,7 @@ a user explicitly asks for it (the "AI refine" button or the chat).
 from __future__ import annotations
 
 import base64
+import re
 from functools import lru_cache
 
 import requests
@@ -24,17 +27,33 @@ from django.conf import settings
 from integrations import hooks
 
 # r2v uses the multi-reference rewrite format; t2v/i2v share the base guide.
-# Image/audio modes reuse the underlying t2v/r2v prompt structure verbatim
-# (see generation/models.py's Mode docstring -- they render through the
-# same workflows) so they share the same guide as their flow's video mode.
+# Image/audio modes render through the same underlying t2v/r2v workflows
+# (see generation/models.py's Mode docstring) but only a fraction of that
+# output survives (one frame for image; the audio track, minus video, for
+# audio) -- the video guides' shot/cut/camera-motion structure describes
+# content that gets thrown away, so image/audio get their own, much
+# simpler guides instead of reusing the video ones verbatim.
 _GUIDE_FILENAMES = {
     "t2v": "VIDEO_PROMPT_WRITING_GUIDE_base_en.md",
     "i2v": "VIDEO_PROMPT_WRITING_GUIDE_base_en.md",
     "r2v": "VIDEO_PROMPT_WRITING_GUIDE_ref_en.md",
-    "t2i": "VIDEO_PROMPT_WRITING_GUIDE_base_en.md",
-    "r2i": "VIDEO_PROMPT_WRITING_GUIDE_ref_en.md",
-    "t2a": "VIDEO_PROMPT_WRITING_GUIDE_base_en.md",
-    "r2a": "VIDEO_PROMPT_WRITING_GUIDE_ref_en.md",
+    "t2i": "IMAGE_PROMPT_WRITING_GUIDE_base_en.md",
+    "r2i": "IMAGE_PROMPT_WRITING_GUIDE_ref_en.md",
+    "t2a": "AUDIO_PROMPT_WRITING_GUIDE_base_en.md",
+    "r2a": "AUDIO_PROMPT_WRITING_GUIDE_ref_en.md",
+}
+
+# Mirrors generation/models.py's CONTENT_TYPE_BY_MODE -- duplicated rather
+# than imported, since integrations/ is the lower-level app here (generation/
+# already depends on it, see tasks.py's imports, not the other way around).
+_CONTENT_TYPE_BY_MODE = {
+    "t2v": "video",
+    "i2v": "video",
+    "r2v": "video",
+    "t2i": "image",
+    "r2i": "image",
+    "t2a": "audio",
+    "r2a": "audio",
 }
 
 
@@ -72,6 +91,22 @@ def _reference_note(reference_labels: list[str] | None) -> str:
     )
 
 
+_WRAPPING_FENCE_RE = re.compile(r"^```[a-zA-Z0-9_-]*\n(.*)\n```$", re.DOTALL)
+
+
+def _strip_wrapping_fence(text: str) -> str:
+    """improve_prompt() asks for the rewritten prompt and nothing else, but
+    a model that's just seen fenced ```text examples in the guide (see the
+    image/audio ref guides' Section 3) sometimes wraps its own reply in one
+    too, out of pattern-matching habit rather than actual intent -- which
+    would otherwise get submitted to ComfyUI as part of the literal prompt
+    text if the user queues it unedited. Only strips a fence that wraps the
+    *entire* reply, not one appearing partway through real content.
+    """
+    match = _WRAPPING_FENCE_RE.match(text.strip())
+    return match.group(1).strip() if match else text
+
+
 def _image_content_part(image_bytes: bytes, content_type: str) -> dict:
     """One OpenAI vision-API `image_url` content part, image bytes inlined
     as a base64 data URL -- see chat_reply()'s reference_images param."""
@@ -105,14 +140,24 @@ def _post_chat_completion(messages: list[dict[str, str]]) -> str:
     return reply
 
 
-def _duration_note(duration_seconds: float | None) -> str:
-    # The house guide requires shot-cut timestamps (and the last-frame
+def _duration_note(mode: str, duration_seconds: float | None) -> str:
+    # Image mode's duration is pinned to the technical minimum (only frame
+    # 0 survives, see generation/models.py's Mode docstring) -- telling the
+    # LLM about it would be noise, not useful context, so this is
+    # deliberately skipped for image content regardless of what's passed.
+    if _CONTENT_TYPE_BY_MODE[mode] == "image" or not duration_seconds:
+        return ""
+    if _CONTENT_TYPE_BY_MODE[mode] == "audio":
+        return (
+            f"\n\nTarget audio duration: {duration_seconds:.2f} seconds. Any dynamics/change "
+            "described as happening at a specific time (per the guide's \"dynamics over the "
+            "clip's duration\") must fall within this duration."
+        )
+    # Video: the house guide requires shot-cut timestamps (and the last-frame
     # alignment instruction's S.SS mark) to fall within the actual video
     # duration -- without this, the LLM has no way to know that duration and
     # would have to guess, easily producing cut times past the real clip
     # length.
-    if not duration_seconds:
-        return ""
     return (
         f"\n\nTarget video duration: {duration_seconds:.2f} seconds. Every shot cut timestamp, "
         "and the last-frame alignment instruction's S.SS mark if this task uses one, must fall "
@@ -146,14 +191,14 @@ def improve_prompt(
         {
             "role": "system",
             "content": (
-                "You rewrite user video prompts to follow the house prompt-writing guide "
-                "below exactly. Output only the rewritten prompt, nothing else."
-                f"{_duration_note(duration_seconds)}\n\n{guide}"
+                f"You rewrite user {_CONTENT_TYPE_BY_MODE[mode]} prompts to follow the house "
+                "prompt-writing guide below exactly. Output only the rewritten prompt, nothing else."
+                f"{_duration_note(mode, duration_seconds)}\n\n{guide}"
             ),
         },
         {"role": "user", "content": user_content},
     ]
-    return _post_chat_completion(messages)
+    return _strip_wrapping_fence(_post_chat_completion(messages))
 
 
 def chat_reply(
@@ -187,7 +232,8 @@ def chat_reply(
     of drifting back to raw_prompt or re-deriving from scratch.
 
     duration_seconds: the currently-selected clip length, if any -- see
-    _duration_note(); needed so shot-cut timestamps stay within the video.
+    _duration_note(); content-type-dependent (shot-cut timestamps for
+    video, dynamics timing for audio, ignored entirely for image).
 
     reference_images: (bytes, content_type) pairs for the currently-staged
     reference images, resent with every call (the caller already has them
@@ -215,14 +261,14 @@ def chat_reply(
     system_message = {
         "role": "system",
         "content": (
-            "You help a user iteratively write and refine a video-generation prompt for the "
-            "MiniMax H3 model, by having a conversation with them -- ask clarifying questions "
-            "when useful, suggest concrete ideas, and revise based on their feedback. The house "
-            "prompt-writing guide below defines the exact structure the FINAL prompt must follow. "
-            "When you have a finalized, ready-to-use prompt to give the user -- proactively once "
-            "the conversation has converged on one, or immediately whenever they ask you to "
-            f"finalize/output it -- put ONLY that exact prompt text in its own fenced code block "
-            f"tagged `{FINAL_PROMPT_FENCE}`, like:\n"
+            f"You help a user iteratively write and refine a {_CONTENT_TYPE_BY_MODE[mode]}-"
+            "generation prompt for the MiniMax H3 model, by having a conversation with them -- "
+            "ask clarifying questions when useful, suggest concrete ideas, and revise based on "
+            "their feedback. The house prompt-writing guide below defines the exact structure "
+            "the FINAL prompt must follow. When you have a finalized, ready-to-use prompt to "
+            "give the user -- proactively once the conversation has converged on one, or "
+            "immediately whenever they ask you to finalize/output it -- put ONLY that exact "
+            f"prompt text in its own fenced code block tagged `{FINAL_PROMPT_FENCE}`, like:\n"
             f"```{FINAL_PROMPT_FENCE}\n<the finished prompt, nothing else>\n```\n"
             f"Never use that `{FINAL_PROMPT_FENCE}` tag for anything other than a complete, "
             "finished prompt -- an app reads that exact block mechanically and offers it to the "
@@ -230,7 +276,7 @@ def chat_reply(
             "no commentary) whenever you use it. The rest of your reply (questions, suggestions, "
             "explanations) goes outside that block, as normal.\n\n"
             f"{_reference_note(reference_labels)}{draft_note}{improved_note}"
-            f"{_duration_note(duration_seconds)}\n\n{guide}"
+            f"{_duration_note(mode, duration_seconds)}\n\n{guide}"
         ),
     }
     messages = [system_message, *history]
