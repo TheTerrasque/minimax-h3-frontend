@@ -25,6 +25,11 @@ const CONTENT_TYPE_LABELS: Record<ContentType, string> = {
   image: "Image",
   audio: "Audio",
 };
+// Both reuse the video pipeline at extreme settings rather than a purpose-
+// built path (see backend's Mode docstring) -- results are noticeably less
+// reliable than video's, so this is flagged rather than presented as an
+// equally-supported option.
+const EXPERIMENTAL_CONTENT_TYPES = new Set<ContentType>(["image", "audio"]);
 const CONTENT_TYPE_NOUN: Record<ContentType, string> = {
   video: "video",
   image: "image",
@@ -504,9 +509,18 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
             onClick={() => setMode(MODES_BY_CONTENT_TYPE[ct][0])}
           >
             {CONTENT_TYPE_LABELS[ct]}
+            {EXPERIMENTAL_CONTENT_TYPES.has(ct) && <span className="tab-badge">Experimental</span>}
           </button>
         ))}
       </div>
+
+      {EXPERIMENTAL_CONTENT_TYPES.has(contentType) && (
+        <p className="hint experimental-notice">
+          {CONTENT_TYPE_LABELS[contentType]} generation is experimental — it reuses the video
+          pipeline at extreme settings rather than a purpose-built path, and results are less
+          consistent than video's.
+        </p>
+      )}
 
       <div className="tab-strip mode-tabs" role="tablist" aria-label="Generation mode">
         {MODES_BY_CONTENT_TYPE[contentType].map((m) => (

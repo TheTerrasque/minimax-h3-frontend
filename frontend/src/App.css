@@ -328,6 +328,35 @@ select {
   cursor: not-allowed;
 }
 
+.tab-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  border-radius: 999px;
+  color: #92400e;
+  background: rgba(217, 119, 6, 0.15);
+  vertical-align: middle;
+}
+
+@media (prefers-color-scheme: dark) {
+  .tab-badge {
+    color: #fbbf24;
+    background: rgba(217, 119, 6, 0.2);
+  }
+}
+
+.experimental-notice {
+  padding: 8px 12px;
+  margin: 0 0 12px;
+  border-radius: 8px;
+  background: rgba(217, 119, 6, 0.08);
+  border: 1px solid rgba(217, 119, 6, 0.25);
+}
+
 /* Resolution & length toolbar -- deliberately subtler than a boxed fieldset
    (a compact, unbordered row) since megapixels/ratio/length matter less
    moment-to-moment than the prompt itself. */
