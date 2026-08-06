@@ -26,6 +26,29 @@ DEBUG = env.bool("DJANGO_DEBUG", default=False)
 ALLOWED_HOSTS = env.list("DJANGO_ALLOWED_HOSTS", default=["localhost", "127.0.0.1"])
 CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=[])
 
+# Always safe to trust: this app is only ever reachable through the
+# frontend nginx container/pod (see frontend/nginx.conf.template), which
+# always sets X-Forwarded-Proto itself -- Django (this process) is never
+# directly internet-facing (no Service/Ingress of its own exposes it), so
+# there's no path for a client to set this header directly and have it
+# trusted here. Needed so request.is_secure() (and therefore secure
+# cookies, SECURE_SSL_REDIRECT below) resolve correctly when TLS actually
+# terminates upstream of this container -- e.g. a Kubernetes Ingress -- and
+# not here.
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+# All default False: plain HTTP (e.g. local docker-compose without a TLS
+# frontend) still works out of the box. Turn all three on together once
+# this is actually served over HTTPS (e.g. behind a Kubernetes Ingress with
+# a real cert) -- see k8s/README.md.
+SECURE_SSL_REDIRECT = env.bool("DJANGO_SECURE_SSL_REDIRECT", default=False)
+SESSION_COOKIE_SECURE = env.bool("DJANGO_SESSION_COOKIE_SECURE", default=False)
+CSRF_COOKIE_SECURE = env.bool("DJANGO_CSRF_COOKIE_SECURE", default=False)
+# 0 (default) leaves HSTS off. Only set this once you're sure every
+# subdomain you'd ever serve from this host is HTTPS-only too -- HSTS is a
+# browser-enforced, cache-lived promise that's hard to walk back early.
+SECURE_HSTS_SECONDS = env.int("DJANGO_SECURE_HSTS_SECONDS", default=0)
+
 
 # Application definition
 

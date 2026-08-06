@@ -117,6 +117,10 @@ All configuration is environment variables, set in `.env` (copy
 | `DJANGO_DEBUG` | `false` | Verbose error pages when `true`. Keep `false` except while actively debugging — it leaks internals. |
 | `DJANGO_ALLOWED_HOSTS` | `localhost,127.0.0.1` | Comma-separated hostnames Django will accept requests for. Must include whatever host you actually browse to. |
 | `CSRF_TRUSTED_ORIGINS` | *(empty)* | Comma-separated full origins (scheme+host+port) allowed to make unsafe (POST/etc.) requests. Must include **every** origin you actually load the SPA from — e.g. both `http://localhost:8080` and `http://127.0.0.1:8080` if you (or anyone else) might use either; Django checks the browser's `Origin` header against this list exactly, so one hostname doesn't cover another that resolves to the same machine. Missing one here 403s with "CSRF verification failed" on every POST, including login. |
+| `DJANGO_SECURE_SSL_REDIRECT` | `false` | Redirect plain HTTP to HTTPS. Only turn on once this is actually served over HTTPS (e.g. behind a Kubernetes Ingress with a real cert) — see [`k8s/README.md`](k8s/README.md). |
+| `DJANGO_SESSION_COOKIE_SECURE` | `false` | Only send the session cookie over HTTPS. Same "only once HTTPS is real" caveat as above. |
+| `DJANGO_CSRF_COOKIE_SECURE` | `false` | Only send the CSRF cookie over HTTPS. Same caveat. |
+| `DJANGO_SECURE_HSTS_SECONDS` | `0` | Seconds browsers should refuse plain HTTP for this host after one HTTPS response. `0` = off. Only set once every subdomain you'd ever serve here is HTTPS-only too, and only after `DJANGO_SECURE_SSL_REDIRECT=true` has been running fine for a while — it's a browser-cached promise that's hard to walk back early. |
 
 ### ComfyUI
 
