@@ -437,6 +437,29 @@ select {
   font-size: 14px;
 }
 
+.file-drop {
+  display: block;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.file-drop:hover {
+  border-color: var(--accent-border);
+}
+
+.file-drop.drag-over {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.file-drop:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-bg), 0 0 0 1px var(--accent);
+}
+
 .ref-thumb-row {
   display: flex;
   align-items: center;

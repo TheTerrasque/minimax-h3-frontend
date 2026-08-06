@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
   useChatReply,
   useConfig,
@@ -107,6 +107,65 @@ function useObjectUrls(files: File[]): string[] {
 
 function hasUrl(r: ReferenceAsset): r is ReferenceAsset & { url: string } {
   return r.url != null;
+}
+
+// e.g. "image/*" -> files whose type starts with "image/". Matches what the
+// sibling <input accept="..."> already restricts the native picker to, so
+// drag-and-drop/paste can't sneak in a file type the form doesn't expect.
+function filesMatchingAccept(files: Iterable<File>, accept: string): File[] {
+  const prefix = accept.endsWith("/*") ? accept.slice(0, -1) : accept;
+  return Array.from(files).filter((f) => f.type.startsWith(prefix));
+}
+
+interface DropZoneProps {
+  accept: string;
+  onFiles: (files: File[]) => void;
+  className?: string;
+  children: ReactNode;
+}
+
+// Wraps a file-picker <label> (its <input type="file"> child is left
+// untouched, so click-to-browse keeps working exactly as before) so the
+// same slot also accepts drag-and-drop and clipboard paste. Paste has no
+// dedicated target of its own -- it fires wherever focus currently is, and
+// bubbles -- so this needs to be focusable itself (tabIndex, for
+// keyboard-only use) and also catches paste while its child <input> has
+// focus (e.g. right after a click-to-browse), since that event bubbles up
+// to this label too.
+function DropZone({ accept, onFiles, className, children }: DropZoneProps) {
+  const [isOver, setIsOver] = useState(false);
+
+  function handleDrop(e: React.DragEvent<HTMLLabelElement>) {
+    e.preventDefault();
+    setIsOver(false);
+    const files = filesMatchingAccept(e.dataTransfer.files, accept);
+    if (files.length) onFiles(files);
+  }
+
+  function handlePaste(e: React.ClipboardEvent<HTMLLabelElement>) {
+    const pasted = Array.from(e.clipboardData.items)
+      .filter((item) => item.kind === "file")
+      .map((item) => item.getAsFile())
+      .filter((f): f is File => f != null);
+    const files = filesMatchingAccept(pasted, accept);
+    if (files.length) onFiles(files);
+  }
+
+  return (
+    <label
+      className={["file-drop", className, isOver ? "drag-over" : ""].filter(Boolean).join(" ")}
+      tabIndex={0}
+      onDragOver={(e) => {
+        e.preventDefault();
+        setIsOver(true);
+      }}
+      onDragLeave={() => setIsOver(false)}
+      onDrop={handleDrop}
+      onPaste={handlePaste}
+    >
+      {children}
+    </label>
+  );
 }
 
 function gcd(a: number, b: number): number {
@@ -222,6 +281,22 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
   const refinePrompt = useRefinePrompt();
   const chatReply = useChatReply();
   const createJob = useCreateJob();
+
+  // DropZone (below) only handles a drop that actually lands on a slot --
+  // without this, a drop that misses by a pixel would fall through to the
+  // browser's own default handling and navigate the whole tab to the
+  // dropped file, losing the in-progress form.
+  useEffect(() => {
+    function preventNavigation(e: DragEvent) {
+      e.preventDefault();
+    }
+    window.addEventListener("dragover", preventNavigation);
+    window.addEventListener("drop", preventNavigation);
+    return () => {
+      window.removeEventListener("dragover", preventNavigation);
+      window.removeEventListener("drop", preventNavigation);
+    };
+  }, []);
 
   // Reset mode-specific state whenever the mode changes -- a preset/reference
   // picked for one mode isn't meaningful for another. (aspectRatio is NOT
@@ -599,9 +674,10 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
         {mode === "i2v" && (
           <fieldset>
             <legend>Reference frames</legend>
+            <p className="hint">Click, drag &amp; drop, or paste an image into either slot.</p>
             <div className="reference-row">
               <div className="file-slot">
-                <label>
+                <DropZone accept="image/*" onFiles={(files) => setFirstFrame(files[0])}>
                   First frame
                   <input
                     key={firstFrameKey}
@@ -609,7 +685,7 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
                     accept="image/*"
                     onChange={(e) => setFirstFrame(e.target.files?.[0] ?? null)}
                   />
-                </label>
+                </DropZone>
                 {firstFrameUrl && (
                   <div className="ref-thumb-row">
                     <img src={firstFrameUrl} className="ref-thumb" alt="First frame preview" />
@@ -620,7 +696,7 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
                 )}
               </div>
               <div className="file-slot">
-                <label>
+                <DropZone accept="image/*" onFiles={(files) => setLastFrame(files[0])}>
                   Last frame (optional)
                   <input
                     key={lastFrameKey}
@@ -628,7 +704,7 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
                     accept="image/*"
                     onChange={(e) => setLastFrame(e.target.files?.[0] ?? null)}
                   />
-                </label>
+                </DropZone>
                 {lastFrameUrl && (
                   <div className="ref-thumb-row">
                     <img src={lastFrameUrl} className="ref-thumb" alt="Last frame preview" />
@@ -648,7 +724,10 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
               <legend>
                 Reference images ({refImages.length}/{maxImages})
               </legend>
-              <p className="hint">Add images, then insert their token into your prompt.</p>
+              <p className="hint">
+                Add images (click, drag &amp; drop, or paste), then insert their token into your
+                prompt.
+              </p>
               {refImages.length > 0 && (
                 <ul className="reference-list">
                   {refImages.map((file, i) => (
@@ -670,7 +749,13 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
                 </ul>
               )}
               {refImages.length < maxImages && (
-                <label className="file-slot">
+                <DropZone
+                  accept="image/*"
+                  className="file-slot"
+                  onFiles={(files) =>
+                    setRefImages((prev) => [...prev, ...files].slice(0, maxImages))
+                  }
+                >
                   Add reference image
                   <input
                     type="file"
@@ -681,7 +766,7 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
                       e.target.value = "";
                     }}
                   />
-                </label>
+                </DropZone>
               )}
             </fieldset>
 
@@ -690,7 +775,10 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
                 <legend>
                   Reference audio ({referenceAudio.length}/{maxAudio})
                 </legend>
-                <p className="hint">Add audio clips, then insert their token into your prompt.</p>
+                <p className="hint">
+                  Add audio clips (click, drag &amp; drop, or paste), then insert their token into
+                  your prompt.
+                </p>
                 {referenceAudio.length > 0 && (
                   <ul className="reference-list">
                     {referenceAudio.map((file, i) => (
@@ -709,7 +797,13 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
                   </ul>
                 )}
                 {referenceAudio.length < maxAudio && (
-                  <label className="file-slot">
+                  <DropZone
+                    accept="audio/*"
+                    className="file-slot"
+                    onFiles={(files) =>
+                      setReferenceAudio((prev) => [...prev, ...files].slice(0, maxAudio))
+                    }
+                  >
                     Add reference audio
                     <input
                       type="file"
@@ -720,7 +814,7 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
                         e.target.value = "";
                       }}
                     />
-                  </label>
+                  </DropZone>
                 )}
               </fieldset>
             )}
