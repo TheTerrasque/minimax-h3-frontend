@@ -21,8 +21,7 @@ broken" messages every time something looks unfamiliar.
 
 Under the hood: Django (API backend) + React (SPA) + Django-Q2 (background
 job queue), talking to that ComfyUI instance, all behind a single nginx
-entrypoint via Docker Compose — see
-[`resources/features.md`](resources/features.md) for the full product brief.
+entrypoint via Docker Compose.
 
 ## Features
 
@@ -47,7 +46,7 @@ entrypoint via Docker Compose — see
 
 You'll need:
 
-- [Docker](https://www.docker.com/) + Docker Compose
+- [Docker](https://www.docker.com/products/docker-desktop/) + Docker Compose
 - A running [ComfyUI](https://www.comfy.org/) instance, reachable from
   wherever Docker runs (see
   [`resources/COMFYUI_API_GUIDE.md`](resources/COMFYUI_API_GUIDE.md) for how
@@ -153,8 +152,8 @@ All configuration is environment variables, set in `.env` (copy
 | `DJANGO_SECRET_KEY` | *(insecure placeholder)* | Django's cryptographic signing key. Generate a real one: `python -c "import secrets; print(secrets.token_urlsafe(50))"`. Treat it as a secret. |
 | `DJANGO_DEBUG` | `false` | Verbose error pages when `true`. Keep `false` except while actively debugging — it leaks internals. |
 | `DJANGO_ALLOWED_HOSTS` | `localhost,127.0.0.1` | Comma-separated hostnames Django will accept requests for. Must include whatever host you actually browse to. |
-| `CSRF_TRUSTED_ORIGINS` | *(empty)* | Comma-separated full origins (scheme+host+port) allowed to make unsafe (POST/etc.) requests. Must include **every** origin you actually load the SPA from — e.g. both `http://localhost:8080` and `http://127.0.0.1:8080` if you (or anyone else) might use either; Django checks the browser's `Origin` header against this list exactly, so one hostname doesn't cover another that resolves to the same machine. Missing one here 403s with "CSRF verification failed" on every POST, including login. |
-| `DJANGO_SECURE_SSL_REDIRECT` | `false` | Redirect plain HTTP to HTTPS. Only turn on once this is actually served over HTTPS (e.g. behind a Kubernetes Ingress with a real cert) — see [`k8s/README.md`](k8s/README.md). |
+| `CSRF_TRUSTED_ORIGINS` | `http://localhost:8080,http://127.0.0.1:8080` | Comma-separated full origins (scheme+host+port) allowed to make unsafe (POST/etc.) requests. Must include **every** origin you actually load the SPA from — e.g. both `http://localhost:8080` and `http://127.0.0.1:8080` if you (or anyone else) might use either; Django checks the browser's `Origin` header against this list exactly, so one hostname doesn't cover another that resolves to the same machine. Missing one here 403s with "CSRF verification failed" on every POST, including login. |
+| `DJANGO_SECURE_SSL_REDIRECT` | `false` | Redirect plain HTTP to HTTPS. Only turn on once this is actually served over HTTPS (e.g. behind a Kubernetes Ingress with a real cert). |
 | `DJANGO_SESSION_COOKIE_SECURE` | `false` | Only send the session cookie over HTTPS. Same "only once HTTPS is real" caveat as above. |
 | `DJANGO_CSRF_COOKIE_SECURE` | `false` | Only send the CSRF cookie over HTTPS. Same caveat. |
 | `DJANGO_SECURE_HSTS_SECONDS` | `0` | Seconds browsers should refuse plain HTTP for this host after one HTTPS response. `0` = off. Only set once every subdomain you'd ever serve here is HTTPS-only too, and only after `DJANGO_SECURE_SSL_REDIRECT=true` has been running fine for a while — it's a browser-cached promise that's hard to walk back early. |
@@ -339,25 +338,19 @@ docker-compose.yml   The whole stack: db, migrate, backend, qcluster, frontend
 
 ## Status
 
-End-to-end working, including a real render. The backend
-(accounts/invites, the full `GenerationJob` create/list/detail/delete +
-presets + queue-estimate API, ComfyUI wiring including image *and* audio
-references, and an optional LLM prompt-assist API — refine + chat) and the
-React frontend (login screen, and a single persistent Generate + Queue
-layout — content-type/mode tabs, a compact resolution/length toolbar,
-reference thumbnails, an always-visible queue sidebar, and a per-job modal
-with download/delete/redo) are both built and verified in a real browser:
-log in → queue a job → watch it update live in the sidebar → open its
-modal. A real submission has also now actually reached ComfyUI and
-rendered a real video, start to finish (see
-[`FUNCTION_CHECK.md`](FUNCTION_CHECK.md) for the repeatable procedure this
-came out of, and `ARCHITECTURE.md`'s "Verification" section for details).
-What's still missing: a proper frontend for the not-yet-built parts (see
-`ARCHITECTURE.md`'s "Deferred"), and a real `benchmark_render_times`
-sweep — `RenderPreset.estimated_render_seconds` values are still mostly
-unbenchmarked guesses, just no longer *unverified guesses about whether
-rendering works at all*. See
-[`ARCHITECTURE.md`](ARCHITECTURE.md) for the full design and exactly what's
-built vs. deferred, [`FUNCTION_CHECK.md`](FUNCTION_CHECK.md) for how to
-re-verify any of this yourself, and [`todo.md`](todo.md) for a
-chronological log of this project's setup.
+Verified end-to-end against a real ComfyUI instance — log in, queue a job,
+watch it render live, download the result — not just written and assumed
+to work. See [`FUNCTION_CHECK.md`](FUNCTION_CHECK.md) for the repeatable
+procedure that confirms this yourself.
+
+Known rough edges:
+
+- `RenderPreset.estimated_render_seconds` values are seeded guesses, not
+  yet benchmarked for real — run `manage.py benchmark_render_times` to
+  tune them for your own hardware (see [Useful commands](#useful-commands)).
+- A few deferred pieces don't have a frontend yet — see
+  [`ARCHITECTURE.md`](ARCHITECTURE.md)'s "Deferred" section for exactly
+  what's built vs. not.
+
+[`todo.md`](todo.md) has a chronological log of how this project came
+together, if you're curious.

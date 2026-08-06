@@ -42,7 +42,7 @@ SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 # All default False: plain HTTP (e.g. local docker-compose without a TLS
 # frontend) still works out of the box. Turn all three on together once
 # this is actually served over HTTPS (e.g. behind a Kubernetes Ingress with
-# a real cert) -- see k8s/README.md.
+# a real cert).
 SECURE_SSL_REDIRECT = env.bool("DJANGO_SECURE_SSL_REDIRECT", default=False)
 SESSION_COOKIE_SECURE = env.bool("DJANGO_SESSION_COOKIE_SECURE", default=False)
 CSRF_COOKIE_SECURE = env.bool("DJANGO_CSRF_COOKIE_SECURE", default=False)
