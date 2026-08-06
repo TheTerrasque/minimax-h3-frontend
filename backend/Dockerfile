@@ -39,4 +39,10 @@ USER appuser
 EXPOSE 8000
 
 ENTRYPOINT ["/app/entrypoint.sh"]
-CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "3"]
+# --timeout 180: gunicorn's default (30s) is well below integrations/llm.py's
+# own 120s request timeout for AI-refine/chat -- a real LLM reply anywhere
+# north of 30s (easy with a bigger model, multi-turn context, or vision
+# images) got its worker killed before the LLM call ever had a chance to
+# finish or time out on its own, surfacing to the user as a silently dropped
+# connection ("Message failed to send"). 180s gives headroom above that 120s.
+CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "3", "--timeout", "180"]
