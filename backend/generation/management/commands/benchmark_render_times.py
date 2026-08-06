@@ -88,6 +88,14 @@ class Command(BaseCommand):
     help = __doc__
 
     def add_arguments(self, parser):
+        # Defaults to every mode, including the image/audio ones -- but this
+        # sweep's --resolution/--duration ranges were designed around video's
+        # shape (meaningful width/height AND duration axes together). Image
+        # modes only really need a megapixels sweep (duration is pinned near
+        # zero, see models.Mode's docstring); audio modes only really need a
+        # duration sweep (resolution is pinned at 32x32). Passing --modes
+        # explicitly with tuned --resolution/--duration values per content
+        # type gets more useful data than the untuned default sweep would.
         parser.add_argument(
             "--modes", nargs="+", choices=Mode.values, default=list(Mode.values)
         )

@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import random
 import uuid
+from pathlib import Path
 from typing import Any
 
 from django.conf import settings
@@ -50,16 +51,25 @@ from django.core.files.base import ContentFile
 from django.db import transaction
 from django.utils import timezone
 
-from integrations import comfyui, hooks
+from integrations import comfyui, hooks, media_post
 
-from .models import GenerationJob, Mode, ReferenceAsset
+from .models import CONTENT_TYPE_BY_MODE, REFERENCE_FLOW_MODES, ContentType, GenerationJob, Mode, ReferenceAsset
 
 SAVE_VIDEO_NODE_ID = "92"
 
+# Image/audio modes have no ComfyUI graph of their own -- they reuse t2v's
+# (text flow) or r2v's (reference flow) video workflow verbatim, patched to
+# extreme settings by _build_workflow_for_job() below, and are turned into
+# their actual output by media_post.py after rendering (see Mode's own
+# docstring in models.py).
 _API_WORKFLOW_FILENAMES = {
     Mode.TEXT_TO_VIDEO: "video_minimax_h3_t2v.api.json",
     Mode.IMAGE_TO_VIDEO: "video_minimax_h3_i2v.api.json",
     Mode.REFERENCE_TO_VIDEO: "video_minimax_h3_r2v.api.json",
+    Mode.TEXT_TO_IMAGE: "video_minimax_h3_t2v.api.json",
+    Mode.REFERENCE_TO_IMAGE: "video_minimax_h3_r2v.api.json",
+    Mode.TEXT_TO_AUDIO: "video_minimax_h3_t2v.api.json",
+    Mode.REFERENCE_TO_AUDIO: "video_minimax_h3_r2v.api.json",
 }
 
 # Node ids inside each mode's .api.json -- see
@@ -103,6 +113,10 @@ _PROGRESS_SAMPLER_NODES = {
     Mode.TEXT_TO_VIDEO: "14",
     Mode.IMAGE_TO_VIDEO: "14",
     Mode.REFERENCE_TO_VIDEO: "125",
+    Mode.TEXT_TO_IMAGE: "14",
+    Mode.REFERENCE_TO_IMAGE: "125",
+    Mode.TEXT_TO_AUDIO: "14",
+    Mode.REFERENCE_TO_AUDIO: "125",
 }
 
 
@@ -158,7 +172,7 @@ def build_api_workflow(
     reading the template file.
     """
     workflow = _load_api_workflow(mode)
-    nodes = _R2V_NODES if mode == Mode.REFERENCE_TO_VIDEO else _T2V_I2V_NODES
+    nodes = _R2V_NODES if mode in REFERENCE_FLOW_MODES else _T2V_I2V_NODES
 
     sampler = workflow[nodes["sampler"]]["inputs"]
     # Bypass ResolutionSelector entirely -- it only accepts an aspect-ratio
@@ -171,7 +185,7 @@ def build_api_workflow(
     workflow[nodes["steps"]]["inputs"]["steps"] = steps
     workflow[nodes["seed"]]["inputs"]["noise_seed"] = random.randint(0, 2**53 - 1)
 
-    if mode == Mode.REFERENCE_TO_VIDEO:
+    if mode in REFERENCE_FLOW_MODES:
         # r2v's prompt is a separate PrimitiveStringMultiline node linked
         # into the sampler, not a literal on the sampler itself.
         workflow[_R2V_NODES["prompt"]]["inputs"]["value"] = prompt_text
@@ -239,7 +253,7 @@ def _build_workflow_for_job(job: GenerationJob) -> dict[str, Any]:
             first_frame_upload = _upload_reference(images[0])
         if len(images) > 1:
             last_frame_upload = _upload_reference(images[1])
-    elif job.mode == Mode.REFERENCE_TO_VIDEO:
+    elif job.mode in REFERENCE_FLOW_MODES:
         images = list(
             job.references.filter(kind=ReferenceAsset.Kind.IMAGE).order_by("order", "id")[
                 :_R2V_MAX_REF_IMAGES
@@ -308,19 +322,38 @@ def _progress_callback(job_id: int) -> Any:
     return on_update
 
 
+def _postprocess_output(job: GenerationJob, output: comfyui.ComfyUIOutput, video_bytes: bytes) -> tuple[str, bytes]:
+    """Turns the rendered video into this job's actual output per its
+    content type (see models.Mode's docstring): video modes save it as-is;
+    image/audio modes derive a still frame / audio-only file from it via
+    ffmpeg (integrations/media_post.py) -- there's no native image- or
+    audio-only ComfyUI graph for this model to render directly instead.
+    Returns (filename, bytes) for GenerationJob.video_file.save().
+    """
+    content_type = CONTENT_TYPE_BY_MODE[job.mode]
+    stem = Path(output.filename).stem
+    if content_type == ContentType.IMAGE:
+        return f"{stem}.png", media_post.extract_first_frame(video_bytes)
+    if content_type == ContentType.AUDIO:
+        return f"{stem}.mp3", media_post.extract_audio(video_bytes)
+    return output.filename, video_bytes
+
+
 def _finish_job_from_history(job: GenerationJob, history_record: dict[str, Any]) -> None:
     """Finalizes an already-DONE-on-ComfyUI's-side prompt: checks for a
     server-side execution error, downloads the video if there wasn't one,
-    saves it, marks the job DONE, and cleans up ComfyUI's own copy. Shared
-    by the normal execute path and orphaned-job recovery -- both end up
-    holding a populated /history record at this point, the rest is
-    identical either way.
+    saves it (or, for image/audio modes, what ffmpeg derives from it -- see
+    _postprocess_output()), marks the job DONE, and cleans up ComfyUI's own
+    copy. Shared by the normal execute path and orphaned-job recovery --
+    both end up holding a populated /history record at this point, the
+    rest is identical either way.
     """
     comfyui.check_for_error(history_record)
     output = comfyui.extract_video_output(history_record, SAVE_VIDEO_NODE_ID)
     video_bytes = comfyui.download_output(output)
+    filename, output_bytes = _postprocess_output(job, output, video_bytes)
 
-    job.video_file.save(output.filename, ContentFile(video_bytes), save=False)
+    job.video_file.save(filename, ContentFile(output_bytes), save=False)
     job.status = GenerationJob.Status.DONE
     job.finished_at = timezone.now()
     job.phase = ""
