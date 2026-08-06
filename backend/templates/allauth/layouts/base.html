@@ -1,0 +1,241 @@
+{% load i18n %}
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta http-equiv="X-UA-Compatible" content="IE=edge">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>
+            {% block head_title %}{% endblock head_title %} · Minimax H3 Generator
+        </title>
+        {% block extra_head %}{% endblock extra_head %}
+        <style>
+            :root {
+                --text: #6b6375;
+                --text-h: #08060d;
+                --bg: #fff;
+                --card-bg: #fff;
+                --border: #e5e4e7;
+                --accent: #aa3bff;
+                --accent-bg: rgba(170, 59, 255, 0.1);
+                --accent-border: rgba(170, 59, 255, 0.5);
+                --shadow: rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+                --sans: system-ui, "Segoe UI", Roboto, sans-serif;
+                color-scheme: light dark;
+            }
+            @media (prefers-color-scheme: dark) {
+                :root {
+                    --text: #9ca3af;
+                    --text-h: #f3f4f6;
+                    --bg: #16171d;
+                    --card-bg: #1c1d24;
+                    --border: #2e303a;
+                    --accent: #c084fc;
+                    --accent-bg: rgba(192, 132, 252, 0.15);
+                    --accent-border: rgba(192, 132, 252, 0.5);
+                    --shadow: rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
+                }
+            }
+            * {
+                box-sizing: border-box;
+            }
+            body {
+                margin: 0;
+                min-height: 100svh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 32px 16px;
+                font: 16px/145% var(--sans);
+                letter-spacing: 0.1px;
+                color: var(--text);
+                background: var(--bg);
+            }
+            .page {
+                width: 100%;
+                max-width: 420px;
+            }
+            .card {
+                background: var(--card-bg);
+                border: 1px solid var(--border);
+                border-radius: 12px;
+                box-shadow: var(--shadow);
+                padding: 32px;
+            }
+            h1 {
+                font-size: 26px;
+                font-weight: 600;
+                letter-spacing: -0.4px;
+                color: var(--text-h);
+                margin: 0 0 16px;
+            }
+            h2 {
+                font-size: 14px;
+                font-weight: 600;
+                text-transform: uppercase;
+                letter-spacing: 0.4px;
+                color: var(--text);
+                margin: 0 0 12px;
+            }
+            p {
+                margin: 0 0 12px;
+            }
+            a {
+                color: var(--accent);
+                text-decoration: none;
+            }
+            a:hover {
+                text-decoration: underline;
+            }
+            hr {
+                border: none;
+                border-top: 1px solid var(--border);
+                margin: 20px 0;
+            }
+            form p {
+                margin: 0 0 14px;
+            }
+            label {
+                display: block;
+                font-size: 13px;
+                font-weight: 500;
+                color: var(--text-h);
+                margin-bottom: 4px;
+            }
+            input:not([type="submit"]):not([type="checkbox"]):not([type="radio"]),
+            textarea,
+            select {
+                width: 100%;
+                padding: 9px 12px;
+                font: inherit;
+                color: var(--text-h);
+                background: var(--bg);
+                border: 1px solid var(--border);
+                border-radius: 8px;
+            }
+            input:focus,
+            textarea:focus,
+            select:focus {
+                outline: none;
+                border-color: var(--accent-border);
+                box-shadow: 0 0 0 3px var(--accent-bg);
+            }
+            input[type="checkbox"],
+            input[type="radio"] {
+                width: auto;
+                margin-right: 6px;
+            }
+            .button {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                width: 100%;
+                padding: 10px 16px;
+                margin-top: 4px;
+                font: inherit;
+                font-weight: 600;
+                color: #fff;
+                background: var(--accent);
+                border: none;
+                border-radius: 8px;
+                cursor: pointer;
+                text-decoration: none;
+            }
+            .button:hover {
+                filter: brightness(1.08);
+                text-decoration: none;
+            }
+            .button-outline {
+                color: var(--text-h);
+                background: transparent;
+                border: 1px solid var(--border);
+            }
+            .button-outline:hover {
+                filter: none;
+                border-color: var(--accent-border);
+            }
+            ul.provider-list {
+                list-style: none;
+                padding: 0;
+                margin: 0;
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+            }
+            ul.messages {
+                list-style: none;
+                padding: 0;
+                margin: 0 0 20px;
+            }
+            ul.messages li {
+                padding: 10px 14px;
+                border-radius: 8px;
+                background: var(--accent-bg);
+                border: 1px solid var(--accent-border);
+                font-size: 14px;
+                margin-bottom: 8px;
+            }
+            ul.menu {
+                list-style: none;
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px 16px;
+                padding: 16px 0 0;
+                margin: 20px 0 0;
+                font-size: 13px;
+                border-top: 1px solid var(--border);
+            }
+        </style>
+    </head>
+    <body>
+        {% block body %}
+            <div class="page">
+                <div class="card">
+                    {% if messages %}
+                        <ul class="messages">
+                            {% for message in messages %}<li>{{ message }}</li>{% endfor %}
+                        </ul>
+                    {% endif %}
+                    {% block content %}
+                    {% endblock content %}
+                    <ul class="menu">
+                        {% if user.is_authenticated %}
+                            {% url 'account_email' as email_url_ %}
+                            {% if email_url_ %}
+                                <li><a href="{{ email_url_ }}">{% trans "Change Email" %}</a></li>
+                            {% endif %}
+                            {% url 'account_change_password' as change_password_url_ %}
+                            {% if change_password_url_ %}
+                                <li><a href="{{ change_password_url_ }}">{% trans "Change Password" %}</a></li>
+                            {% endif %}
+                            {% url 'socialaccount_connections' as connections_url_ %}
+                            {% if connections_url_ %}
+                                <li><a href="{{ connections_url_ }}">{% trans "Account Connections" %}</a></li>
+                            {% endif %}
+                            {% url 'mfa_index' as mfa_url_ %}
+                            {% if mfa_url_ %}
+                                <li><a href="{{ mfa_url_ }}">{% trans "Two-Factor Authentication" %}</a></li>
+                            {% endif %}
+                            {% url 'usersessions_list' as usersessions_list_url_ %}
+                            {% if usersessions_list_url_ %}
+                                <li><a href="{{ usersessions_list_url_ }}">{% trans "Sessions" %}</a></li>
+                            {% endif %}
+                            {% url 'account_logout' as logout_url_ %}
+                            {% if logout_url_ %}
+                                <li><a href="{{ logout_url_ }}">{% trans "Sign Out" %}</a></li>
+                            {% endif %}
+                        {% else %}
+                            {% url 'account_login' as login_url_ %}
+                            {% if login_url_ %}
+                                <li><a href="{{ login_url_ }}">{% trans "Sign In" %}</a></li>
+                            {% endif %}
+                        {% endif %}
+                        <li><a href="/">{% trans "Back to app" %}</a></li>
+                    </ul>
+                </div>
+            </div>
+        {% endblock body %}
+        {% block extra_body %}
+        {% endblock extra_body %}
+    </body>
+</html>

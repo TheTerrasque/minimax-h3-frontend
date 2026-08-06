@@ -21,7 +21,7 @@ deliberately not built yet.
       export_workflow_api.py    # UI-format workflow -> API-format JSON converter
       object_info_cache/          # cached live /object_info responses it used
     config/                  # settings / urls / wsgi
-    accounts/                 # custom User, invite-gated OIDC login, GET /api/me/
+    accounts/                 # custom User, invite-gated signup + auto-accepted OIDC, GET /api/me/
     generation/                # domain models, admin, API views, job task
       management/commands/
         benchmark_render_times.py # sweeps ComfyUI real-run capacity/timing
@@ -182,20 +182,30 @@ is satisfied.
 **invite-only login** (features.md: "no random people on the page, just the
 ones I invite"):
 
-- Local email/password self-signup is disabled outright
-  (`NoSelfSignupAccountAdapter.is_open_for_signup` → `False`).
-- OIDC login is **auto-accepted** for any configured OIDC provider app
-  (`InviteGatedSocialAccountAdapter`, `AUTO_ACCEPTED_PROVIDER_IDS`) — an
-  admin only ever wires up an OIDC server they already trust to authenticate
-  the right people, so a successful login there already proves the person
-  was let in on that server's side.
-- Anything else (a more open social provider added later, or local accounts
-  re-enabled for one person) is gated by `Invite`: an admin-issued, one-time
-  token redeemed at `/invite/<token>/`, which stashes the token in the
-  session; `is_open_for_signup` then requires it, and it's marked redeemed
-  in `save_user` once signup actually completes. Currently unused by the
-  OIDC path (which auto-accepts) but is the mechanism the moment a
-  non-trusted provider exists — see `accounts/adapters.py`.
+- OIDC login is **auto-accepted** by default for the configured OIDC
+  provider app (`InviteGatedSocialAccountAdapter` checks
+  `sociallogin.account.provider == settings.OIDC_PROVIDER_ID`, gated by
+  `OIDC_AUTO_SIGNUP`, default `True`) — an admin only ever wires up an OIDC
+  server they already trust to authenticate the right people, so a
+  successful login there already proves the person was let in on that
+  server's side. Set `OIDC_AUTO_SIGNUP=false` to require an invite for OIDC
+  logins too (e.g. the IdP isn't a closed set of pre-approved people).
+- Local email/password signup (django-allauth's `account` app) is
+  invite-gated rather than disabled: `NoSelfSignupAccountAdapter
+  .is_open_for_signup` only allows it when a valid (unredeemed, unexpired)
+  invite token sits in the session, and `clean_email` further enforces the
+  invite's optional email lock once the signup form is actually submitted
+  (the email isn't known any earlier).
+- Invite flow: `/invite/<token>/` (`accounts/views.py`'s `invite_redeem`)
+  validates the token, stashes it in the session, and redirects to
+  allauth's own `account_signup` form — completing that form creates the
+  account and marks the invite redeemed in
+  `NoSelfSignupAccountAdapter.save_user`. This is the path for anyone
+  without an account on the configured OIDC server (or when OIDC isn't
+  configured at all). See `accounts/adapters.py`.
+- `backend/templates/allauth/` overrides allauth's bare default templates
+  (login, signup, etc.) with styling that matches the SPA — Django's
+  `TEMPLATES[0].DIRS` is searched before `APP_DIRS`, so these win.
 - Invites are created/managed from Django admin (`accounts/admin.py`) **or**
   from the in-app admin page at `/manage` (SPA route, `IsAdminUser`-gated —
   see "Frontend" below) — `accounts/api.py`'s `GET/POST /api/invites/` and

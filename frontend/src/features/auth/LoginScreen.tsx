@@ -1,9 +1,10 @@
 import { useConfig } from "../../api/queries";
 
-// Login itself is entirely Django/allauth's job (OIDC redirect, or the
-// classic /accounts/login/ form for admin-created accounts) -- this screen
-// just points the browser at the right URL. See ARCHITECTURE.md "Backend
-// apps" / "accounts" for why there's no self-signup form here.
+// Login/signup are entirely Django/allauth's job (OIDC redirect, the classic
+// /accounts/login/ form, or the invite-gated /accounts/signup/ form reached
+// via an /invite/<token>/ link) -- this screen just points the browser at
+// the right URL. See ARCHITECTURE.md "Backend apps" / "accounts" for why
+// there's no self-service signup form here.
 export function LoginScreen() {
   const config = useConfig();
 
@@ -23,8 +24,9 @@ export function LoginScreen() {
         )}
 
         <p className="hint">
-          No account yet? You'll need an invite link from an admin — opening it
-          logs you in and creates one.
+          No {config.data?.oidc_provider_name ?? "OIDC"} account? You'll need an
+          invite link from an admin — opening it lets you set up a
+          password-based account.
         </p>
         <p className="hint">
           <a href="/accounts/login/">Have a password-based account instead?</a>

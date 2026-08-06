@@ -78,12 +78,16 @@ There is no open signup. Two ways to get an account:
 - **A configured OIDC server is itself the trust gate** — if you set the
   `OIDC_*` variables below, anyone who can successfully log in through that
   identity provider gets an account automatically (you already control who
-  has credentials there).
+  has credentials there). Set `OIDC_AUTO_SIGNUP=false` if you'd rather
+  require an invite even for OIDC logins (e.g. the IdP isn't a closed set of
+  pre-approved people).
 - **Everyone else needs an admin-issued invite** — create one from the
   in-app admin page at `/manage` (visible in the nav to any staff user) or
   from Django admin at `/admin/`, then send the person its
-  `/invite/<token>/` URL. Opening that link and completing login is what
-  actually creates their account; the token is single-use. `/manage` also
+  `/invite/<token>/` URL. Opening that link sends them to a local
+  email/password signup form (`/accounts/signup/`); completing it is what
+  actually creates their account, and the token is single-use (locked to a
+  specific email too, if the invite was created with one). `/manage` also
   lists existing invites (active/redeemed/expired) with copy-link and
   revoke actions.
 
@@ -146,6 +150,7 @@ Optional — leave `OIDC_CLIENT_ID` blank to run without OIDC configured yet (yo
 | `OIDC_ISSUER_URL` | *(empty)* | The OIDC provider's issuer URL (its discovery document lives at `<issuer>/.well-known/openid-configuration`). |
 | `OIDC_CLIENT_ID` | *(empty)* | OAuth client ID registered with that provider. |
 | `OIDC_CLIENT_SECRET` | *(empty)* | OAuth client secret. |
+| `OIDC_AUTO_SIGNUP` | `true` | `true`: completing OIDC login alone creates an account, no invite needed. `false`: OIDC logins need a valid invite too, same as any other new signup. |
 
 ### Background jobs
 

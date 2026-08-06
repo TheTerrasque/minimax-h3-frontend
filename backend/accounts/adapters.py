@@ -1,22 +1,24 @@
 """Invite-only account provisioning -- see features.md ("no random people on
 the page, just the ones I invite") and Invite in accounts/models.py.
 
-There is no open signup, by either path:
+There is no *open* signup, by either path:
 
-- Local email/password signup (django-allauth's `account` app) is disabled
-  outright -- this app only expects OIDC login.
 - OIDC login auto-creates an account with no invite needed, because the
   *set of configured OIDC provider apps is itself the gate*: an admin only
   ever wires up an OIDC server (settings.SOCIALACCOUNT_PROVIDERS) they
   already trust to authenticate the right people (e.g. their own identity
   provider), so successfully completing that login already proves the
   person was let in on that server's side.
-- The Invite/token flow (accounts/views.py) exists for anything *other* than
-  a configured OIDC server -- e.g. if a more open/public social provider is
-  ever added later that Isn't itself a closed set of pre-approved people, or
-  local accounts are ever re-enabled for a specific person. It is currently
-  unused by the OIDC path but kept as the fallback gate for that case.
+- Local email/password signup (django-allauth's `account` app) is for
+  everyone else -- people who don't have an account on the configured OIDC
+  server. It's gated entirely behind the Invite/token flow
+  (accounts/views.py): visiting a valid /invite/<token>/ link stashes the
+  token in session and sends the visitor to allauth's own signup form
+  (account_signup); without a valid token in session, signup is closed.
 """
+
+from django import forms
+from django.conf import settings
 
 from allauth.account.adapter import DefaultAccountAdapter
 from allauth.socialaccount.adapter import DefaultSocialAccountAdapter
@@ -25,21 +27,52 @@ from .models import Invite
 
 INVITE_SESSION_KEY = "invite_token"
 
-# Provider ids (allauth Provider.id, shared by every app/server configured
-# for that provider type -- see SOCIALACCOUNT_PROVIDERS) that are trusted
-# outright: an admin only configures an OIDC server they already control who
-# has an account on, so no separate invite is required for those logins.
-AUTO_ACCEPTED_PROVIDER_IDS = {"openid_connect"}
+
+def _session_invite(request) -> Invite | None:
+    token = request.session.get(INVITE_SESSION_KEY)
+    if not token:
+        return None
+    return Invite.objects.filter(token=token).first()
 
 
 class NoSelfSignupAccountAdapter(DefaultAccountAdapter):
-    def is_open_for_signup(self, request):
-        return False
+    def is_open_for_signup(self, request) -> bool:
+        # Email isn't known yet at this point (the signup form hasn't been
+        # submitted) -- any email lock on the invite is enforced later, once
+        # we do know it (clean_email).
+        invite = _session_invite(request)
+        return invite is not None and not invite.is_redeemed and not invite.is_expired
+
+    def clean_email(self, email: str) -> str:
+        email = super().clean_email(email)
+        invite = _session_invite(self.request)
+        if invite is None or not invite.is_valid_for_email(email):
+            raise forms.ValidationError(
+                "This invite link doesn't cover that email address."
+            )
+        return email
+
+    def save_user(self, request, user, form, commit: bool = True):
+        user = super().save_user(request, user, form, commit=commit)
+        token = request.session.pop(INVITE_SESSION_KEY, None)
+        if token:
+            invite = Invite.objects.filter(token=token).first()
+            if invite is not None:
+                invite.redeem(user)
+        return user
 
 
 class InviteGatedSocialAccountAdapter(DefaultSocialAccountAdapter):
     def is_open_for_signup(self, request, sociallogin) -> bool:
-        if sociallogin.account.provider in AUTO_ACCEPTED_PROVIDER_IDS:
+        # NOTE: for providers configured via SOCIALACCOUNT_PROVIDERS.APPS
+        # (as OIDC is here), allauth sets SocialAccount.provider to that
+        # app's `provider_id` (settings.OIDC_PROVIDER_ID, e.g. "oidc") --
+        # NOT the provider *type* ("openid_connect"). See
+        # SocialAccount.provider's docstring in allauth/socialaccount/models.py.
+        if (
+            settings.OIDC_AUTO_SIGNUP
+            and sociallogin.account.provider == settings.OIDC_PROVIDER_ID
+        ):
             return True
         token = request.session.get(INVITE_SESSION_KEY)
         if not token:

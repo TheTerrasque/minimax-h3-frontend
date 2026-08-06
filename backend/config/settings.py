@@ -67,7 +67,10 @@ ROOT_URLCONF = "config.urls"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
+        # templates/ overrides allauth's bare default templates (login,
+        # logout, etc. -- see templates/allauth/layouts/base.html) with
+        # something styled; DIRS is searched before APP_DIRS so it wins.
+        "DIRS": [BASE_DIR / "templates"],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -161,6 +164,14 @@ SOCIALACCOUNT_ADAPTER = "accounts.adapters.InviteGatedSocialAccountAdapter"
 # kwargs={"provider_id": OIDC_PROVIDER_ID}) in accounts/views.py) -- distinct
 # from OIDC_PROVIDER_NAME below, which is just the human-readable label.
 OIDC_PROVIDER_ID = "oidc"
+
+# Whether completing OIDC login alone (no invite token) is enough to create
+# an account -- see accounts.adapters.InviteGatedSocialAccountAdapter. On by
+# default: the set of configured OIDC provider apps is itself the trust
+# gate (an admin only wires up an IdP they already trust the userbase of).
+# Turn off to require an invite for everyone, OIDC included -- e.g. when the
+# configured IdP isn't a closed set of pre-approved people.
+OIDC_AUTO_SIGNUP = env.bool("OIDC_AUTO_SIGNUP", default=True)
 
 # Populated only when an OIDC provider is actually configured, so the app
 # still boots cleanly in early dev before an IdP is wired up.
