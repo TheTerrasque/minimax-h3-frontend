@@ -83,6 +83,28 @@ _R2V_NODES = {
 _R2V_MAX_REF_IMAGES = 9  # per live /object_info: ref_images autogrow max
 _R2V_MAX_REF_AUDIO = 3  # per live /object_info: ref_audios autogrow max (prefix "ref_audio_")
 
+# The node ComfyUI actually reports step-by-step `progress` events for --
+# NOT _T2V_I2V_NODES/_R2V_NODES's "sampler" entry above. That "sampler" key
+# is the MiniMaxH3*ToVideo node itself, which only encodes the prompt/image
+# into conditioning + an initial latent (see its outputs feeding
+# BasicGuider/SamplerCustomAdvanced below) -- it executes and returns
+# quickly, *before* the real K-sampler loop, so treating it as "the
+# sampler" for progress purposes made the UI show "rendering" during what
+# was still model loading/conditioning ("preparing"), then "finishing"
+# during the real sampling steps once the actual SamplerCustomAdvanced node
+# started (misattributed as "after the sampler"), and no progress bar ever
+# appeared (its `progress` messages carry this node id, which never matched
+# the wrong one being watched for). Confirmed against each mode's .api.json
+# (grep '"class_type": "SamplerCustomAdvanced"'). Used only by
+# _execute_job's live progress streaming (see integrations/comfyui.py's
+# stream_execution_progress) -- has no bearing on build_api_workflow's
+# patching, which still keys off "sampler" above.
+_PROGRESS_SAMPLER_NODES = {
+    Mode.TEXT_TO_VIDEO: "14",
+    Mode.IMAGE_TO_VIDEO: "14",
+    Mode.REFERENCE_TO_VIDEO: "125",
+}
+
 
 def _load_api_workflow(mode: str) -> dict[str, Any]:
     path = settings.RESOURCES_DIR / "workflows_api" / _API_WORKFLOW_FILENAMES[mode]
@@ -352,7 +374,6 @@ def _execute_job(job: GenerationJob) -> None:
     """
     try:
         workflow = _build_workflow_for_job(job)
-        nodes = _R2V_NODES if job.mode == Mode.REFERENCE_TO_VIDEO else _T2V_I2V_NODES
 
         client_id = str(uuid.uuid4())
         prompt_id = comfyui.queue_prompt(workflow, client_id)
@@ -366,7 +387,7 @@ def _execute_job(job: GenerationJob) -> None:
         # the actual result always still comes from wait_for_result()+
         # check_for_error() below, exactly as before this was added.
         comfyui.stream_execution_progress(
-            prompt_id, client_id, nodes["sampler"], _progress_callback(job.id), timeout=timeout
+            prompt_id, client_id, _PROGRESS_SAMPLER_NODES[job.mode], _progress_callback(job.id), timeout=timeout
         )
 
         history_record = comfyui.wait_for_result(prompt_id, timeout=timeout)
