@@ -8,13 +8,16 @@ clean, simple web page to use it from — type a prompt, pick a quality
 level, hit render, watch it show up in your queue — instead of wiring up
 ComfyUI's node-graph editor by hand every time.
 
-![The Generate screen: prompt box, quality/aspect-ratio/length controls, and a live queue sidebar](resources/screenshots/generate-desktop.png)
+It also makes it easy to share your ComfyUI server with friends without
+handing them the keys to it: they get their own login, their own private
+queue and history, and never touch your actual ComfyUI setup. They can't
+mess with your workflows or settings, they don't see what you're making,
+and you're not stuck walking them through ComfyUI or fielding "why is it
+broken" messages every time something looks unfamiliar.
 
-<details>
-<summary>It's comfortable on a phone too</summary>
-<br>
-<img src="resources/screenshots/generate-mobile.png" alt="The Generate screen on a phone" width="320">
-</details>
+| Desktop | Mobile |
+|---|---|
+| ![The Generate screen: prompt box, quality/aspect-ratio/length controls, and a live queue sidebar](resources/screenshots/generate-desktop.png) | ![The Generate screen on a phone](resources/screenshots/generate-mobile.png) |
 
 Under the hood: Django (API backend) + React (SPA) + Django-Q2 (background
 job queue), talking to that ComfyUI instance, all behind a single nginx
@@ -37,19 +40,33 @@ entrypoint via Docker Compose — see
 - **Invite-only accounts** — no open signup; log in via your own OIDC
   provider, or via admin-issued invite links
 - **A per-job history** — every past render, with download/delete/redo
+- **Separate accounts, separate renders** — everyone only ever sees their
+  own queue and history, never anyone else's jobs or prompts
 
 ## Quick start
 
 You'll need:
 
-- Docker + Docker Compose
+- [Docker](https://www.docker.com/) + Docker Compose
 - A running [ComfyUI](https://www.comfy.org/) instance, reachable from
   wherever Docker runs (see
   [`resources/COMFYUI_API_GUIDE.md`](resources/COMFYUI_API_GUIDE.md) for how
   that connection works) — ComfyUI itself is **not** part of this stack,
   you bring your own
+- That ComfyUI instance already set up to run the official MiniMax H3
+  workflows — see [Required ComfyUI models](#required-comfyui-models) below
+  for exactly which model files that means
 
-**1. Configure it.**
+**1. Get the code.**
+
+```sh
+git clone https://github.com/TheTerrasque/minimax-h3-frontend.git
+cd minimax-h3-frontend
+```
+
+(No git? Use GitHub's "Code → Download ZIP" button instead and extract it.)
+
+**2. Configure it.**
 
 ```sh
 cp .env.example .env
@@ -59,7 +76,7 @@ Open `.env` and set at least `DJANGO_SECRET_KEY`, `POSTGRES_PASSWORD`, and
 `COMFYUI_BASE_URL` (everything else has a working default — see
 [Configuration](#configuration) below for the full list).
 
-**2. Start it.**
+**3. Start it.**
 
 ```sh
 docker compose up -d --build
@@ -69,7 +86,7 @@ This builds and starts everything — Postgres, migrations, Django, the
 Django-Q2 worker, and the nginx-fronted frontend — and serves the app at
 **http://localhost:8080/**.
 
-**3. Create your admin account.**
+**4. Create your admin account.**
 
 ```sh
 docker compose exec backend python manage.py createsuperuser
@@ -198,6 +215,29 @@ docker compose exec backend python manage.py shell
 # the point); see ARCHITECTURE.md's "Benchmarking render times"
 docker compose exec backend python manage.py benchmark_render_times --help
 ```
+
+## Required ComfyUI models
+
+This project's `resources/workflows/` graphs (see below) are ComfyUI's
+official [day-0 MiniMax H3 support](https://blog.comfy.org/p/minimax-h3-day-0-support-in-comfyui)
+— that post is the best source for what the model can actually do and how
+the workflow is put together. The model weights themselves are on
+[Hugging Face — Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3).
+
+Download these into your ComfyUI instance's usual model folders before
+pointing this project at it:
+
+| Model file | Type | Folder |
+|---|---|---|
+| `minimax_h3_fl2va_pruned_int8_convrot.safetensors` | Diffusion model (text-to-video / image-to-video) | `models/diffusion_models/` |
+| `minimax_h3_ref2va_pruned_int8_convrot.safetensors` | Diffusion model (reference-to-video) | `models/diffusion_models/` |
+| `minimax_h3_video_vae_fp16.safetensors` | Video VAE | `models/vae/` |
+| `minimax_h3_audio_vae_fp32.safetensors` | Audio VAE | `models/vae/` |
+| `qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` | Text encoder | `models/text_encoders/` (`models/clip/` on older ComfyUI versions) |
+
+This project doesn't provide or download these itself — that list is just
+what `resources/workflows_api/*.json` actually reference; check those files
+yourself if a future model update changes the exact filenames.
 
 ## Updating the ComfyUI workflows
 
