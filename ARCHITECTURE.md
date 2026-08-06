@@ -25,10 +25,10 @@ deliberately not built yet.
     generation/                # domain models, admin, API views, job task
       management/commands/
         benchmark_render_times.py # sweeps ComfyUI real-run capacity/timing
-    integrations/               # comfyui.py + llm.py service clients (no models)
+    integrations/               # comfyui.py + llm.py service clients, media_post.py (ffmpeg), hooks.py (no models)
   frontend/                # React (Vite + TS)
-    Dockerfile                # multi-stage: node build -> nginx
-    nginx.conf                 # serves the SPA + reverse-proxies to backend
+    Dockerfile                # multi-stage: node build -> nginx-unprivileged
+    nginx.conf.template        # envsubst template: serves the SPA + reverse-proxies to backend
     src/
       api/
         client.ts                # fetch wrapper: session cookie + CSRF header
@@ -51,17 +51,19 @@ deliberately not built yet.
 
 `frontend`'s nginx container is the **only** service that publishes a host
 port. It serves the built SPA at `/` and reverse-proxies `/api/`,
-`/accounts/`, `/admin/`, `/static/`, `/media/` straight to the `backend`
-container (see [`frontend/nginx.conf`](frontend/nginx.conf)). The browser
-therefore only ever talks to one origin.
+`/accounts/`, `/admin/`, `/invite/`, `/static/`, `/media/` straight to the
+`backend` container (see
+[`frontend/nginx.conf.template`](frontend/nginx.conf.template)). The
+browser therefore only ever talks to one origin.
 
 **Routing gotcha, worth remembering before adding SPA routes**: nginx's
-proxy rule is a prefix match on `^/(api|accounts|admin|static|media)/`, so
-any SPA route starting with one of those segments — e.g. a naive `/admin`
-page — would be silently swallowed by that rule and handed to Django's own
-admin site before React Router ever sees it. This is why the in-app admin
-page lives at **`/manage`** instead of `/admin` (see `accounts`/"Frontend"
-below) — pick a prefix outside that set for any future SPA route too.
+proxy rule is a prefix match on `^/(api|accounts|admin|invite|static|media)/`,
+so any SPA route starting with one of those segments — e.g. a naive
+`/admin` page — would be silently swallowed by that rule and handed to
+Django's own admin site before React Router ever sees it. This is why the
+in-app admin page lives at **`/manage`** instead of `/admin` (see
+`accounts`/"Frontend" below) — pick a prefix outside that set for any
+future SPA route too.
 
 That's what makes plain **Django session-cookie auth** viable for the SPA:
 allauth's OIDC callback sets a session cookie, and `src/api/client.ts` just
@@ -71,30 +73,43 @@ or storage. If a bare `manage.py runserver` + separate Vite dev server is
 ever used outside Docker, that's the one setup where CORS would start
 mattering — out of scope here since this pass is Docker-first.
 
-**Gotcha hit and fixed during setup:** nginx resolves a plain
-`proxy_pass http://backend:8000;` hostname once at startup and caches it —
-so whenever the `backend` container gets recreated (any rebuild/redeploy),
-its Docker-internal IP changes and nginx keeps proxying to the old, dead
-address (502s) until nginx itself restarts. Fixed in `nginx.conf` by
-resolving `backend` through Docker Compose's embedded DNS
-(`resolver 127.0.0.11`) via a variable on every request instead, so
-`frontend` no longer needs restarting after a `backend` rebuild — verified
-by force-recreating `backend` alone and confirming `frontend` picked up the
-new IP with zero manual intervention.
+**Known nginx gotchas, hit and fixed during setup:**
 
-**Second gotcha, hit and fixed later:** nginx's own default
-`client_max_body_size` is 1MB, far below what `POST /api/jobs/` needs once
-reference uploads are involved (r2v takes up to 9 images + 3 audio clips in
-one multipart request, see "Backend apps" above) — every such submission
-was rejected with a `413` **by nginx itself**, before the request ever
-reached Django (Django's own `DATA_UPLOAD_MAX_MEMORY_SIZE` doesn't apply
-here — its docs explicitly exclude file upload data from that check — so
-nginx's default was the only thing actually capping it). Fixed with
-`client_max_body_size 500m;` on the proxied location in `nginx.conf`;
-verified by posting real multi-file multipart bodies (a plain 2MB file, then
-a combined ~22MB two-file r2v-shaped request) straight through nginx and
-confirming they now reach Django (a `403` for lacking a session, not a
-`413`) instead of being rejected at the proxy.
+- **Stale backend IP after a rebuild.** nginx resolves a plain
+  `proxy_pass http://backend:8000;` hostname once at startup and caches
+  it — so whenever the `backend` container gets recreated (any
+  rebuild/redeploy), its Docker-internal IP changes and nginx keeps
+  proxying to the old, dead address (502s) until nginx itself restarts.
+  Fixed in `nginx.conf.template` by resolving `backend` through Docker
+  Compose's embedded DNS (`resolver 127.0.0.11`, or
+  `${NGINX_LOCAL_RESOLVERS}` — auto-detected at container start, see
+  `frontend/Dockerfile`) via a variable on every request instead, so
+  `frontend` no longer needs restarting after a `backend` rebuild —
+  verified by force-recreating `backend` alone and confirming `frontend`
+  picked up the new IP with zero manual intervention.
+- **Upload size cap.** nginx's own default `client_max_body_size` is 1MB,
+  far below what `POST /api/jobs/` needs once reference uploads are
+  involved (r2v/r2i/r2a take up to 9 images + 3 audio clips in one
+  multipart request, see "Backend apps" above) — every such submission was
+  rejected with a `413` **by nginx itself**, before the request ever
+  reached Django (Django's own `DATA_UPLOAD_MAX_MEMORY_SIZE` doesn't apply
+  here — its docs explicitly exclude file upload data from that check — so
+  nginx's default was the only thing actually capping it). Fixed with
+  `client_max_body_size 500m;` on the proxied location in
+  `nginx.conf.template`; verified by posting real multi-file multipart
+  bodies (a plain 2MB file, then a combined ~22MB two-file r2v-shaped
+  request) straight through nginx and confirming they now reach Django (a
+  `403` for lacking a session, not a `413`) instead of being rejected at
+  the proxy.
+- **X-Forwarded-Proto trust.** nginx used to pass through whatever
+  `X-Forwarded-Proto` a client sent, which Django's
+  `SECURE_PROXY_SSL_HEADER` would then trust unconditionally — letting a
+  plain-HTTP client spoof "https" and bypass `DJANGO_SECURE_SSL_REDIRECT`
+  once that's turned on. Fixed by defaulting to nginx's own connection
+  scheme instead; set `NGINX_TRUST_FORWARDED_PROTO=true` only when this
+  container is guaranteed to sit behind another hop (e.g. a Kubernetes
+  Ingress) that overwrites the header itself. See
+  `frontend/nginx.conf.template`'s own comment for the full reasoning.
 
 ## Docker Compose service graph
 
@@ -140,13 +155,21 @@ confirming they now reach Django (a `403` for lacking a session, not a
   uploads/access checks going forward — files already stored under their
   old, predictable names keep those names unless separately renamed; not
   done this pass.)
-- **`qcluster`** — same image as `backend`, running `manage.py qcluster` —
-  the Django-Q2 worker process that executes `generation.tasks.process_queue`.
-  Pinned to a single worker (`Q_CLUSTER_WORKERS=1`) so jobs render strictly
-  one at a time, FIFO — see `tasks.py`'s bullet under "Backend apps" for why
-  that's enforced at the DB-query level, not by Django-Q2's own worker count.
-- **`frontend`** — nginx; the stack's one published port (`8080:80` by
-  default).
+- **`qcluster`** — same image as `backend`, running
+  `manage.py recover_stale_jobs && manage.py qcluster` — the recovery
+  command first re-queues any job left stuck `processing` by a previous
+  `qcluster` restart (see `recover_orphaned_processing_jobs()` in
+  `tasks.py`), then starts the Django-Q2 worker that executes
+  `generation.tasks.process_queue`. Pinned to a single worker
+  (`Q_CLUSTER_WORKERS=1`, timeout configurable via `Q_CLUSTER_TIMEOUT`) so
+  jobs render strictly one at a time, FIFO — see `tasks.py`'s bullet under
+  "Backend apps" for why that's enforced at the DB-query level, not by
+  Django-Q2's own worker count.
+- **`frontend`** — `nginxinc/nginx-unprivileged`, running as a non-root
+  user (so it satisfies Kubernetes' "restricted" Pod Security Standard with
+  no `securityContext` workarounds); the stack's one published port
+  (`8080:8080` by default — the container itself listens on 8080, an
+  unprivileged port, not 80).
 
 `backend`/`qcluster` get `extra_hosts: host.docker.internal:host-gateway` so
 a `COMFYUI_BASE_URL` pointed at the Docker *host* itself (e.g. ComfyUI
@@ -171,10 +194,13 @@ same-machine case.
 Config is env-driven (`django-environ`), via `.env` → `env_file:` for every
 backend-image-based service. See `.env.example` for the full list
 (Postgres creds, `DJANGO_SECRET_KEY`/`DEBUG`/`ALLOWED_HOSTS`,
-`CSRF_TRUSTED_ORIGINS`, ComfyUI/LLM endpoints, OIDC settings,
-Django-Q2 worker count) — this is also how features.md item 12
-("Endpoints for comfyui and llm should be configured in django settings")
-is satisfied.
+`CSRF_TRUSTED_ORIGINS`, HTTPS/reverse-proxy settings
+(`SECURE_SSL_REDIRECT`/`SESSION_COOKIE_SECURE`/`CSRF_COOKIE_SECURE`/
+`SECURE_HSTS_SECONDS`), ComfyUI/LLM endpoints, OIDC settings, email
+settings (falls back to the console backend when `EMAIL_HOST` is unset),
+`Q_CLUSTER_WORKERS`/`Q_CLUSTER_TIMEOUT`) — this is also how features.md
+item 12 ("Endpoints for comfyui and llm should be configured in django
+settings") is satisfied.
 
 ## Backend apps
 
@@ -220,21 +246,26 @@ ones I invite"):
 
 - `RenderPreset` — admin-editable **"quality tier"**: `(mode, label,
   megapixels, steps, is_draft, sort_order)`, backing features.md item 4. No
-  width/height/duration here at all anymore (see below). Six tiers per
-  mode as originally seeded by
-  `generation/migrations/0012_standard_tier_and_full_duration_range.py`:
-  `Draft` (0.2MP, 8 steps, `is_draft=True` — the fast/low-step preview
-  tier, not a separate model/pipeline) plus five genuine, non-draft tiers
-  — `Standard` (0.2MP, 20 steps — same resolution as Draft but real step
-  count, for the cheapest *real* quality rather than a preview), `Low`
-  (0.3MP), `Medium` (0.4MP), `High` (0.5MP), `Max` (0.6MP), all 20 steps —
-  labels are just a starting point, not fixed: the admin catalog tool
-  below can rename/reorder/duplicate them freely (e.g. the live catalog
-  has already had "Standard" renamed to "Lowest" through it). `sort_order`
-  (added by `0013_renderpreset_sort_order.py`) is the admin-controlled
-  display order, kept in sync across every mode's row for the same label —
-  see the reorder endpoint below. Also leaves room for the later
-  image/audio-only modes (item 6) without new models.
+  width/height/duration here at all anymore (see below).
+  - **Video modes (t2v/i2v/r2v)**: six tiers per mode as originally seeded
+    by `generation/migrations/0012_standard_tier_and_full_duration_range.py`:
+    `Draft` (0.2MP, 8 steps, `is_draft=True` — the fast/low-step preview
+    tier, not a separate model/pipeline) plus five genuine, non-draft tiers
+    — `Standard` (0.2MP, 20 steps — same resolution as Draft but real step
+    count, for the cheapest *real* quality rather than a preview), `Low`
+    (0.3MP), `Medium` (0.4MP), `High` (0.5MP), `Max` (0.6MP), all 20 steps —
+    labels are just a starting point, not fixed: the admin catalog tool
+    below can rename/reorder/duplicate them freely (e.g. the live catalog
+    has already had "Standard" renamed to "Lowest" through it).
+  - **Image modes (t2i/r2i)** and **audio modes (t2a/r2a)** got their own,
+    separate, smaller catalogs via
+    `generation/migrations/0018_seed_image_audio_catalog.py` — deliberately
+    different labels (`Standard`/`Sharp`/`Ultra` for images, `Fast`/`Rich`
+    for audio) so the admin catalog doesn't lump them in with the video
+    tiers above, which don't apply to a single-frame or audio-only render.
+  - `sort_order` (added by `0013_renderpreset_sort_order.py`) is the
+    admin-controlled display order, kept in sync across every mode's row
+    for the same label — see the reorder endpoint below.
 - `RenderDuration` — one selectable clip length for a given `RenderPreset`
   (FK), each with its **own independently admin-set/benchmarked**
   `estimated_render_seconds` rather than one derived from a formula (render
@@ -257,44 +288,50 @@ ones I invite"):
   and "removing" anything is always `is_active=False` (both models'
   `PROTECT` FK from `GenerationJob` makes a hard delete of an in-use row
   fail anyway, so soft-disable is the only option that always works).
-  Six endpoints: `GET /api/quality-catalog/` (full read model, grouped by
-  label, including inactive rows so they can be re-enabled);
-  `POST /api/quality-levels/` (create a level across one or more modes at
-  once, optionally cloning another level's active durations so it isn't
-  born unusable); `PATCH /api/quality-levels/<label>/` (rename — updates
-  every mode's row at once — and/or partially update/add a mode/set
-  `sort_order` directly); `POST /api/quality-levels/reorder/` (bulk
-  reorder — body is every existing label in the desired order, 400 if the
-  set doesn't match exactly; this is also what reorders the quality
-  dropdown on the Generate screen, since it shares `RenderPreset.Meta.
-  ordering`); `PATCH /api/quality-durations/<seconds>/` (the actual "limit
-  this duration to certain quality levels or modes" tool — a list of
-  `(label, mode, is_active, estimated_render_seconds)` targets, all
-  validated before anything is written; also how a brand new duration
-  value gets introduced, since it upserts rather than requiring a separate
-  create step); `POST /api/quality-durations/estimate/` (fits real
-  completed-job render times, **pooled across every quality level of one
-  mode at once** rather than one preset at a time — `{mode, apply}`, no
-  `label`. The shared dimension is **workload = `job.steps *
-  job.megapixels * job.duration_seconds`** (a proxy for total compute/
-  data): a completed job on one level and a completed job on another
-  level at the *same* requested duration land at *different* workload
-  values, which is what lets the fit see the gap between levels and use
-  every level's history at once instead of starving each preset of its
-  own sparse data — direct user request, expecting the resulting curves
-  to "mirror each other" once plotted this way. Needs 2+ distinct
-  workload values among completed jobs or returns `fit_available: false`
-  rather than an error. Also attempts a **single-breakpoint piecewise
-  fit** — brute-force search over candidate workload splits, two
-  independent OLS lines, only used if it beats the single line's SSE by
-  ≥15% and there are ≥8 total points (guards against overfitting sparse
-  data) — modeling the "VRAM → system RAM → swap" resource-cliff
-  hypothesis the user described: a real regime change should land at
-  roughly the same *workload* across levels even though that's a
-  different `duration_seconds` per level. With `apply: true`, writes the
-  selected model's fitted estimate onto every `RenderDuration` row that
-  already exists for *any* level of that mode, never creating new rows or
-  touching `is_active`. `GenerationJob` gained a `steps` snapshot field
+  Six endpoints:
+  - `GET /api/quality-catalog/` — full read model, grouped by label,
+    including inactive rows so they can be re-enabled.
+  - `POST /api/quality-levels/` — create a level across one or more modes
+    at once, optionally cloning another level's active durations so it
+    isn't born unusable.
+  - `PATCH /api/quality-levels/<label>/` — rename (updates every mode's
+    row at once) and/or partially update/add a mode/set `sort_order`
+    directly.
+  - `POST /api/quality-levels/reorder/` — bulk reorder; body is every
+    existing label in the desired order, 400 if the set doesn't match
+    exactly. Also what reorders the quality dropdown on the Generate
+    screen, since it shares `RenderPreset.Meta.ordering`.
+  - `PATCH /api/quality-durations/<seconds>/` — the actual "limit this
+    duration to certain quality levels or modes" tool: a list of
+    `(label, mode, is_active, estimated_render_seconds)` targets, all
+    validated before anything is written. Also how a brand new duration
+    value gets introduced, since it upserts rather than requiring a
+    separate create step.
+  - `POST /api/quality-durations/estimate/` — fits real completed-job
+    render times, **pooled across every quality level of one mode at
+    once** rather than one preset at a time (`{mode, apply}`, no `label`).
+    The shared dimension is **workload = `job.steps * job.megapixels *
+    job.duration_seconds`** (a proxy for total compute/data): a completed
+    job on one level and a completed job on another level at the *same*
+    requested duration land at *different* workload values, which is what
+    lets the fit see the gap between levels and use every level's history
+    at once instead of starving each preset of its own sparse data —
+    direct user request, expecting the resulting curves to "mirror each
+    other" once plotted this way. Needs 2+ distinct workload values among
+    completed jobs or returns `fit_available: false` rather than an
+    error. Also attempts a **single-breakpoint piecewise fit** —
+    brute-force search over candidate workload splits, two independent
+    OLS lines, only used if it beats the single line's SSE by ≥15% and
+    there are ≥8 total points (guards against overfitting sparse data) —
+    modeling the "VRAM → system RAM → swap" resource-cliff hypothesis the
+    user described: a real regime change should land at roughly the same
+    *workload* across levels even though that's a different
+    `duration_seconds` per level. With `apply: true`, writes the selected
+    model's fitted estimate onto every `RenderDuration` row that already
+    exists for *any* level of that mode, never creating new rows or
+    touching `is_active`.
+
+  `GenerationJob` gained a `steps` snapshot field
   (`0014_generationjob_steps_snapshot.py`, mirroring the existing
   `megapixels`/`duration_seconds` snapshots and for the same reason —
   computing workload from `job.preset.steps` live would silently
@@ -332,12 +369,14 @@ ones I invite"):
   the catalog can't retroactively change a number already shown to a user,
   and so `tasks.py` has everything it needs without extra joins. `status` is
   deliberately just `queued`/`processing`/`done` — jobs render strictly one
-  at a time, FIFO (see `tasks.py` below), so there's no "about to run" vs
-  "running" distinction worth making, and `done` covers both success and
+  at a time, FIFO (see `tasks.py` below), and `done` covers both success and
   failure (told apart by `video_file`/`error_message`, not a separate
   terminal status — a real `failed`/`cancelled` split can come back if that
   distinction needs to be first-class again; cancellation was never wired
-  up regardless).
+  up regardless). The finer-grained "what's actually happening right now"
+  detail this deliberately leaves out lives in the separate `phase`/
+  `progress_current`/`progress_total` fields instead (see `api.py` below),
+  not by adding more `status` values.
 - `ReferenceAsset` — image/video/audio attachments on a job, with a computed
   `label` (`"Picture 1"`, `"Video 1"`, `"Audio 1"`) matching the
   `<Picture N>`/`<Video N>`/`<Audio N>` convention in
@@ -411,9 +450,9 @@ ones I invite"):
   where it points; `aspect_ratios` + `default_aspect_ratio`, mirroring
   `resolution.ASPECT_RATIOS` — doesn't vary per mode, so it lives here
   rather than being repeated on every preset), `POST /api/prompt/refine/`
-  (one-shot "AI refine"), the chat endpoints
-  (`POST /api/prompt/chat/sessions/`, `GET .../sessions/{id}/`,
-  `POST .../sessions/{id}/messages/`), `GET /api/presets/` (optionally
+  (one-shot "AI refine"), `POST /api/prompt/chat/` (the whole conversation
+  is passed in and echoed back each call — stateless, no session model or
+  DB row; see "LLM integration" below for why), `GET /api/presets/` (optionally
   `?mode=`, each preset's response nests its nested `durations` array so
   the frontend has every selectable clip length up front without an extra
   round trip when the user changes the megapixels dropdown),
@@ -442,8 +481,15 @@ ones I invite"):
   create response itself) includes `raw_prompt` (lifted to the base
   serializer, not detail-only, so the frontend's queue sidebar can show a
   title without a second request per job) and `expected_finish_time` (via
-  `queue.expected_finish_times()`, `null` once `done`). `GET /api/jobs/{id}/`
-  is what the frontend polls for status; the same URL also takes `DELETE`
+  `queue.expected_finish_times()`, `null` once `done`), plus `phase` and
+  `progress_current`/`progress_total` (`0016_generationjob_phase_progress.py`)
+  — populated live by `integrations/comfyui.py`'s
+  `stream_execution_progress()` watching ComfyUI's own execution WebSocket
+  events, and rendered as the queue sidebar's per-job progress bar
+  (`frontend/src/features/queue/JobProgressBar.tsx`); a finer-grained
+  sub-state than the coarse `status` field below ever tries to be.
+  `GET /api/jobs/{id}/` is what the frontend polls for status; the same
+  URL also takes `DELETE`
   (409 while `processing` — `_execute_job()` is actively mutating that row —
   otherwise removes the job's reference/video files from disk and the row
   itself, `204` on success). Every view carries an `@extend_schema`
@@ -466,10 +512,24 @@ ones I invite"):
   `KeyError` reaching into an unpopulated `outputs` dict, and so the
   benchmark command can tell a slow-but-alive server apart from a crashed one.
 - `llm.py` — OpenAI-compatible chat-completion client; loads the right guide
-  from `resources/prompt instructions/` per mode (base guide for t2v/i2v, the
-  reference guide for r2v) as system context. `is_configured()` backs
+  from `resources/prompt instructions/` per mode as system context: the base
+  guide for t2v/i2v, the reference guide for r2v, and simpler
+  purpose-written guides for the four image/audio modes (t2i/r2i/t2a/r2a)
+  rather than reusing the video guides verbatim — most of what a video
+  prompt guide covers (motion, pacing, duration) doesn't apply once the
+  output is a single frame or an audio track. `is_configured()` backs
   `settings.LLM_ENABLED`. Two entry points: `improve_prompt()` (one-shot
   rewrite) and `chat_reply()` (multi-turn, given the full prior history).
+- `media_post.py` — ffmpeg-based post-processing backing the experimental
+  image/audio modes: pulls a still frame or the audio track out of the
+  video `tasks.py` actually rendered, since those modes submit the same
+  t2v/r2v graph rather than having workflows of their own (see the
+  top-level README's "Updating the ComfyUI workflows" section).
+- `hooks.py` — optional site-specific hook mechanism: `PRE_LLM_HOOK`/
+  `POST_LLM_HOOK`/`PRE_RENDER_HOOK`/`POST_RENDER_HOOK` settings, each a
+  Python dotted path to a callable, wired into `llm.py`/`tasks.py` around
+  the LLM call and the render itself. All optional/unset by default; see
+  `backend/hooks_example.py` for the expected signature of each.
 
 ## Frontend
 
@@ -506,22 +566,31 @@ so this is plain prop-drilling rather than URL/router state. There's no
 `?job=` deep link for the modal — a deliberate simplification.
 
 **`features/generate/GenerateScreen.tsx`** — above the form, two tab strips:
-a **content-type** row (`Video` / `Image` / `Audio`) where only `Video` is
-enabled — this project only ever generates video, so `Image`/`Audio` are
-purely a placeholder for a possible future pipeline, not backed by anything
-— and a **mode** row (t2v/i2v/r2v) that drives which reference fields
-render below: i2v gets two explicit file slots ("First frame" / "Last frame
-(optional)"), each showing a local thumbnail preview once a file is picked;
-r2v gets a dynamic add/remove **image** list (thumbnails + "Insert token"
-writing `<Picture N>`) and a separate dynamic **audio** list (`<Audio N>`
-tokens, filename only — no useful static thumbnail for audio); t2v gets
-neither. `MAX_REFERENCE_IMAGES`/`MAX_REFERENCE_AUDIO` on the frontend mirror
-`generation/api.py`'s `_MAX_REFERENCE_IMAGES`/`_MAX_REFERENCE_AUDIO`
-(images: 0/2/9, audio: 0/0/3) so the "add" controls disable at the right
-count instead of relying on the eventual 400 from the server. Thumbnails
-are `URL.createObjectURL(file)` previews (revoked on change/unmount via a
-small `useObjectUrl`/`useObjectUrls` helper) — client-side only, nothing
-uploaded yet at this point.
+
+- A **content-type** row (`Video` / `Image` / `Audio`) — all three are
+  enabled; `Image`/`Audio` carry an "Experimental" badge
+  (`EXPERIMENTAL_CONTENT_TYPES`) and a warning notice, since they reuse the
+  video pipeline at extreme settings (via `media_post.py`, see
+  "integrations" above) rather than a purpose-built path.
+- A **mode** row beneath it, scoped to the selected content type:
+  t2v/i2v/r2v for Video, t2i/r2i for Image, t2a/r2a for Audio. The mode
+  drives which reference fields render below: i2v gets two explicit file
+  slots ("First frame" / "Last frame (optional)"), each showing a local
+  thumbnail preview once a file is picked; r2v/r2i/r2a get a dynamic
+  add/remove **image** list (thumbnails + "Insert token" writing
+  `<Picture N>`) and — r2v/r2a only, not r2i — a separate dynamic **audio**
+  list (`<Audio N>` tokens, filename only, no useful static thumbnail for
+  audio; r2i skips it since a still frame extracted from the underlying
+  video can't carry any reference-audio influence); t2v/t2i/t2a get
+  neither. `MAX_REFERENCE_IMAGES`/`MAX_REFERENCE_AUDIO` on the frontend
+  mirror `generation/api.py`'s `_MAX_REFERENCE_IMAGES`/
+  `_MAX_REFERENCE_AUDIO` (images: t2v/t2i/t2a 0, i2v 2, r2v/r2i/r2a 9;
+  audio: t2v/i2v/t2i/t2a/r2i 0, r2v/r2a 3) so the "add" controls disable at
+  the right count instead of relying on the eventual 400 from the server.
+
+Thumbnails are `URL.createObjectURL(file)` previews (revoked on
+change/unmount via a small `useObjectUrl`/`useObjectUrls` helper) —
+client-side only, nothing uploaded yet at this point.
 
 "Resolution & length" is a compact, unbordered **toolbar** row (not a boxed
 fieldset, and not a list of preset cards — two redesigns back from the
@@ -531,7 +600,11 @@ the prompt): a **Quality** `<select>` (the `RenderPreset`/megapixels tier,
 `GET /api/presets/?mode=`, auto-selecting the first non-draft one), an
 **Aspect ratio** `<select>` (from `GET /api/config/`'s `aspect_ratios`,
 defaulting to `default_aspect_ratio` — independent of mode, so switching
-mode doesn't reset it), and a **Length** `<input type="range">` whose stops
+mode doesn't reset it; i2v adds one extra, client-computed option once a
+first frame is picked — `computeImageAspectRatio()` reads the image's own
+pixel dimensions and offers "match first frame" as an extra entry, not
+sourced from `/api/config/` at all, validated server-side the same as any
+other value via `resolution.is_valid_aspect_ratio()`), and a **Length** `<input type="range">` whose stops
 are exactly the selected preset's `durations` array (an index into that
 array, not a continuous value — so it only ever lands on an
 actually-benchmarked duration) with its own per-duration estimate shown
@@ -868,7 +941,8 @@ yet.
    before the user confirms.
 4. While drafting a prompt, the user may click "AI refine"
    (`POST /api/prompt/refine/`, one-shot) or open the chat
-   (`POST /api/prompt/chat/sessions/` + `.../messages/`, multi-turn).
+   (`POST /api/prompt/chat/`, multi-turn, stateless — see "LLM
+   integration" below).
 5. `POST /api/jobs/` creates a `GenerationJob` (raw + optionally the
    AI-refined prompt from step 4) plus any staged reference images/audio,
    snapshotting `estimated_seconds` from the chosen `RenderPreset`, and
@@ -937,9 +1011,10 @@ its separate `PrimitiveStringMultiline` node) — re-confirmed after the
 `/api/prompt/refine/`, and the full chat session flow (see "LLM integration"
 above).
 
-**Update — a real live ComfyUI render has now actually been done** (see
-[`FUNCTION_CHECK.md`](FUNCTION_CHECK.md) for the repeatable procedure this
-came out of). Queued a real draft t2v job (`608×320`, `3s`, `8` steps)
+### A real live ComfyUI render has now actually been done
+
+See [`FUNCTION_CHECK.md`](FUNCTION_CHECK.md) for the repeatable procedure
+this came out of. Queued a real draft t2v job (`608×320`, `3s`, `8` steps)
 against the actual `gpusun` GPU box with go-ahead to spend the GPU time:
 queued → `processing` → `done`, a real ~126KB valid `.mp4` came back
 (`ftypisom` header confirmed), `error_message` empty, and ComfyUI's own
@@ -963,10 +1038,11 @@ A real `benchmark_render_times` run — actually sweeping the
 resolution/duration matrix rather than one manual job — has **still not**
 been done; see "Deferred" below.
 
-**Update — resolution/length UI redesign + a real `/media/` 404 bug fixed**
-(triggered by user-reported feedback after the pass above: the old
+### Resolution/length UI redesign + a real `/media/` 404 bug fixed
+
+Triggered by user-reported feedback after the pass above: the old
 preset-card picker was too big for too few options, and generated videos
-404'd on the Queue screen). Two independent fixes:
+404'd on the Queue screen. Two independent fixes:
 
 - **`/media/` 404**: `config/urls.py` never actually mounted a URL pattern
   for `MEDIA_URL` at all — not a `DEBUG`-only gap, since
@@ -1005,8 +1081,9 @@ displayed estimate correctly (confirmed the slider drives real React state
 via keyboard interaction, not just a visual thumb position), matching the
 seeded catalog data exactly.
 
-**Update — frontend redesign (`frontend fixes.txt`) + `ref_audio_N` wiring +
-job delete.** Backend: `ref_audio_N` wiring was live-verified against the
+### Frontend redesign (`frontend fixes.txt`) + `ref_audio_N` wiring + job delete
+
+Backend: `ref_audio_N` wiring was live-verified against the
 actual ComfyUI instance before writing any code — queried
 `/object_info/LoadAudio` (confirmed its only input is `audio`, COMBO/
 filename-based, identical shape to `LoadImage.inputs.image`) and
@@ -1060,8 +1137,9 @@ being reachable is the normal state here, not a rare edge case — any
 browser-driven test that exercises real job submission needs this same
 immediate-cancel treatment unless GPU time is explicitly wanted.
 
-**Update — `benchmark_render_times` made crash-resilient for unattended
-overnight runs.** Prompted directly by the user: their ComfyUI is behind a
+### `benchmark_render_times` made crash-resilient for unattended overnight runs
+
+Prompted directly by the user: their ComfyUI is behind a
 process manager that auto-restarts it within ~1 minute of a crash, and they
 want to start the sweep and walk away, not babysit it. Rewrote the crash
 path (`_run_combo_with_crash_recovery()`, `_wait_for_restart()`,
@@ -1094,8 +1172,9 @@ DB:
 All three matched the intended design. `manage.py check` clean after the
 rebuild.
 
-**Update — chat UX (feedback while waiting, markdown rendering, final-prompt
-extraction) + `LLM_API_KEY` wrongly required.** Two separate user reports.
+### Chat UX (feedback while waiting, markdown rendering, final-prompt extraction) + `LLM_API_KEY` wrongly required
+
+Two separate user reports.
 First: `settings.LLM_ENABLED`/`integrations.llm.is_configured()` both
 required `LLM_API_KEY` truthy, so a user who configured a real, reachable,
 key-less local LLM server still got no AI UI at all — fixed by dropping
@@ -1116,8 +1195,9 @@ own card with no raw fence syntax leaking into the visible text; clicking
 **Use this prompt** filled the prompt textarea with exactly the extracted
 text, no fence markers. 10/10 checks passed, zero console errors.
 
-**Update — queuing no longer pops a modal + redo restores the AI-refined
-prompt.** Two more direct user reports. First: submitting a job opened its
+### Queuing no longer pops a modal + redo restores the AI-refined prompt
+
+Two more direct user reports. First: submitting a job opened its
 `JobModal` immediately (an earlier pass's `onJobCreated` callback) — the
 user wanted queuing to just add the job to the sidebar and leave them on
 the form, not interrupt with a popup; fixed by deleting `onJobCreated`
@@ -1138,8 +1218,9 @@ Noted here for the same reason as before: `COMFYUI_BASE_URL` being
 reachable in this environment means *any* real submission during a
 browser-driven check can end up actually rendering, not just being queued.
 
-**Update — redo also restores reference images/audio, not just prompt
-fields.** Direct follow-up: "redo doesn't keep images" (reference files
+### Redo also restores reference images/audio, not just prompt fields
+
+Direct follow-up: "redo doesn't keep images" (reference files
 were documented as a known limitation, not actually attempted). Implemented
 `fetchAsFile()`-based restoration (see "Frontend" above) and, while
 verifying it, caught and fixed a second real bug in the *same* redo
@@ -1153,8 +1234,9 @@ accidental real render) — r2v redo restored both reference images (correct
 filenames, correct order, thumbnails) and the audio reference; i2v redo
 restored first *and* last frame. 7/7 checks passed, zero console errors.
 
-**Update — `/media/` is now actually access-controlled, not just
-unguessable.** Direct follow-up in the same pass: unguessable filenames
+### `/media/` is now actually access-controlled, not just unguessable
+
+Direct follow-up in the same pass: unguessable filenames
 stop *enumeration* but don't stop anyone who has, guesses, or otherwise
 obtains one specific URL from fetching it with no login at all — the bare
 `django.views.static.serve` mount only checked that a path existed on
@@ -1187,8 +1269,9 @@ user: `404`; a staff user (not the owner): `200`. Also verified the actual
 — the ownership check doesn't accidentally break normal playback for the
 owning user, only cross-user/anonymous access.
 
-**Update — orphaned-job recovery after a restart, plus a real incident
-discovering it the hard way.** Direct user report: a job was stuck showing
+### Orphaned-job recovery after a restart, plus a real incident discovering it the hard way
+
+Direct user report: a job was stuck showing
 "Processing…" forever, correctly diagnosed as the result of a qcluster
 restart landing mid-render — `_claim_next_job()` only ever claims `QUEUED`
 jobs, so a `PROCESSING` job orphaned by a dead worker had nothing that
@@ -1207,8 +1290,9 @@ those two checks; `_execute_job()`'s finalize-from-a-finished-prompt logic
 was extracted into `_finish_job_from_history()` so both the normal path
 and recovery share it exactly rather than duplicating it.
 
-**A real incident happened while testing this, worth recording in full**:
-dry-run testing the three recovery scenarios (found in history / still
+#### A real incident happened while testing this, worth recording in full
+
+Dry-run testing the three recovery scenarios (found in history / still
 queued / genuinely lost) by mocking `integrations.comfyui` and calling
 `recover_orphaned_processing_jobs()` directly via `manage.py shell` against
 the actual shared dev database. The function queries *every* `PROCESSING`
@@ -1256,10 +1340,9 @@ the test. Added a loud, explicit warning to
 invocation outside its two real call sites, recording this exact incident
 as the reason.
 
-**Update — Standard tier + full 2–20s duration range, JobModal megapixels,
-nearest-duration reconciliation fix, and the chat rewrite (stateless +
-context-aware + vision-configurable) above**, all direct user requests
-batched into one pass. Migration `0012` verified for real: every tier
+### Standard tier + full 2–20s duration range, JobModal megapixels, nearest-duration reconciliation fix, and the chat rewrite (stateless + context-aware + vision-configurable, see "LLM integration" above)
+
+All direct user requests batched into one pass. Migration `0012` verified for real: every tier
 (including the new `Standard`) offers exactly the 19 durations 2–20s;
 pre-existing jobs' `RenderDuration` FKs (`PROTECT`) confirmed untouched —
 this migration only *adds* rows, never deletes/reseeds, specifically
@@ -1320,16 +1403,9 @@ Intentionally not built in this pass:
   generated from `/api/schema/`; fine at this size, worth automating if the
   API surface keeps growing.
 - **Tests.**
-- **TLS / production hardening** — the compose stack is plain HTTP on
-  `localhost:8080`; no cert/reverse-TLS-termination is set up.
 - **Media/static serving at scale** — `/media/` is served directly by
   Django for now; moving it to nginx-volume serving or object storage is a
   follow-up once upload volume matters.
-- **Image/Audio content-type tabs are cosmetic only** — the Generate
-  screen's top-level `Video`/`Image`/`Audio` tab strip has `Image`/`Audio`
-  present-but-disabled; nothing anywhere in this backend can actually
-  generate an image or audio-only output yet. Purely a placeholder for a
-  possible future pipeline per direct user request.
 - **No deep link for the job modal** — opening a job's detail (`JobModal`)
   is plain component state in `App.tsx`'s `MainLayout`, not synced to the
   URL (no `?job=<id>`); a deliberate simplification, easy to add later if
