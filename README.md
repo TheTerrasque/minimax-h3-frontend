@@ -21,28 +21,22 @@ job queue), talking to that ComfyUI instance, all behind a single nginx
 entrypoint via Docker Compose — see
 [`resources/features.md`](resources/features.md) for the full product brief.
 
-**Status:** end-to-end working, including a real render. The backend
-(accounts/invites, the full `GenerationJob` create/list/detail/delete +
-presets + queue-estimate API, ComfyUI wiring including image *and* audio
-references, and an optional LLM prompt-assist API — refine + chat) and the
-React frontend (login screen, and a single persistent Generate + Queue
-layout — content-type/mode tabs, a compact resolution/length toolbar,
-reference thumbnails, an always-visible queue sidebar, and a per-job modal
-with download/delete/redo) are both built and verified in a real browser:
-log in → queue a job → watch it update live in the sidebar → open its
-modal. A real submission has also now actually reached ComfyUI and
-rendered a real video, start to finish (see
-[`FUNCTION_CHECK.md`](FUNCTION_CHECK.md) for the repeatable procedure this
-came out of, and `ARCHITECTURE.md`'s "Verification" section for details).
-What's still missing: a proper frontend for the not-yet-built parts (see
-`ARCHITECTURE.md`'s "Deferred"), and a real `benchmark_render_times`
-sweep — `RenderPreset.estimated_render_seconds` values are still mostly
-unbenchmarked guesses, just no longer *unverified guesses about whether
-rendering works at all*. See
-[`ARCHITECTURE.md`](ARCHITECTURE.md) for the full design and exactly what's
-built vs. deferred, [`FUNCTION_CHECK.md`](FUNCTION_CHECK.md) for how to
-re-verify any of this yourself, and [`todo.md`](todo.md) for a
-chronological log of this project's setup.
+## Features
+
+- **Text-to-video, image-to-video, and reference-to-video** — plus
+  experimental text-to-image, reference-to-image, text-to-audio, and
+  reference-to-audio modes
+- **A live queue** — watch a job's progress update in real time, right in
+  the sidebar, no refreshing
+- **Quality/resolution/length presets** — pick a tier (e.g.
+  Draft/Standard/High) instead of tuning raw sampler settings
+- **Reference uploads** — click, drag-and-drop, or paste in images/audio to
+  guide a render
+- **Optional AI prompt help** — an "AI refine" button and a chat panel for
+  drafting prompts, if you point it at an OpenAI-compatible LLM endpoint
+- **Invite-only accounts** — no open signup; log in via your own OIDC
+  provider, or via admin-issued invite links
+- **A per-job history** — every past render, with download/delete/redo
 
 ## Quick start
 
@@ -284,3 +278,28 @@ frontend/      React SPA (Vite + TS), served by nginx in front of everything
 resources/     Product brief, ComfyUI workflows + API guide, prompt-writing guides
 docker-compose.yml   The whole stack: db, migrate, backend, qcluster, frontend
 ```
+
+## Status
+
+End-to-end working, including a real render. The backend
+(accounts/invites, the full `GenerationJob` create/list/detail/delete +
+presets + queue-estimate API, ComfyUI wiring including image *and* audio
+references, and an optional LLM prompt-assist API — refine + chat) and the
+React frontend (login screen, and a single persistent Generate + Queue
+layout — content-type/mode tabs, a compact resolution/length toolbar,
+reference thumbnails, an always-visible queue sidebar, and a per-job modal
+with download/delete/redo) are both built and verified in a real browser:
+log in → queue a job → watch it update live in the sidebar → open its
+modal. A real submission has also now actually reached ComfyUI and
+rendered a real video, start to finish (see
+[`FUNCTION_CHECK.md`](FUNCTION_CHECK.md) for the repeatable procedure this
+came out of, and `ARCHITECTURE.md`'s "Verification" section for details).
+What's still missing: a proper frontend for the not-yet-built parts (see
+`ARCHITECTURE.md`'s "Deferred"), and a real `benchmark_render_times`
+sweep — `RenderPreset.estimated_render_seconds` values are still mostly
+unbenchmarked guesses, just no longer *unverified guesses about whether
+rendering works at all*. See
+[`ARCHITECTURE.md`](ARCHITECTURE.md) for the full design and exactly what's
+built vs. deferred, [`FUNCTION_CHECK.md`](FUNCTION_CHECK.md) for how to
+re-verify any of this yourself, and [`todo.md`](todo.md) for a
+chronological log of this project's setup.
