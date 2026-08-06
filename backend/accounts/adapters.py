@@ -19,6 +19,8 @@ There is no *open* signup, by either path:
 
 from django import forms
 from django.conf import settings
+from django.core.exceptions import PermissionDenied
+from django.db import transaction
 
 from allauth.account.adapter import DefaultAccountAdapter
 from allauth.socialaccount.adapter import DefaultSocialAccountAdapter
@@ -35,11 +37,35 @@ def _session_invite(request) -> Invite | None:
     return Invite.objects.filter(token=token).first()
 
 
+def _claim_invite(request) -> Invite | None:
+    """Lock and re-validate the session's invite immediately before an
+    account is created from it, inside the caller's transaction.
+
+    is_open_for_signup()/clean_email() only ever check an invite's state at
+    a point in time -- without this, two requests holding the same token
+    (e.g. two people sent the same link, or one person submitting the
+    signup form from two tabs) could both pass those checks before either
+    has redeemed it, each creating its own account from what's meant to be
+    a single-use token. select_for_update() blocks the second caller until
+    the first's transaction commits, so it sees the now-redeemed row and
+    raises instead of creating a duplicate account.
+    """
+    token = request.session.get(INVITE_SESSION_KEY)
+    if not token:
+        return None
+    invite = Invite.objects.select_for_update().filter(token=token).first()
+    if invite is None or invite.is_redeemed or invite.is_expired:
+        raise PermissionDenied("This invite has already been used.")
+    return invite
+
+
 class NoSelfSignupAccountAdapter(DefaultAccountAdapter):
     def is_open_for_signup(self, request) -> bool:
         # Email isn't known yet at this point (the signup form hasn't been
         # submitted) -- any email lock on the invite is enforced later, once
-        # we do know it (clean_email).
+        # we do know it (clean_email). This is a cheap up-front check only --
+        # see _claim_invite() for the race-safe check actually enforced at
+        # account-creation time.
         invite = _session_invite(request)
         return invite is not None and not invite.is_redeemed and not invite.is_expired
 
@@ -53,12 +79,12 @@ class NoSelfSignupAccountAdapter(DefaultAccountAdapter):
         return email
 
     def save_user(self, request, user, form, commit: bool = True):
-        user = super().save_user(request, user, form, commit=commit)
-        token = request.session.pop(INVITE_SESSION_KEY, None)
-        if token:
-            invite = Invite.objects.filter(token=token).first()
+        with transaction.atomic():
+            invite = _claim_invite(request)
+            user = super().save_user(request, user, form, commit=commit)
             if invite is not None:
                 invite.redeem(user)
+                request.session.pop(INVITE_SESSION_KEY, None)
         return user
 
 
@@ -83,10 +109,10 @@ class InviteGatedSocialAccountAdapter(DefaultSocialAccountAdapter):
         return invite.is_valid_for_email(sociallogin.user.email or "")
 
     def save_user(self, request, sociallogin, form=None):
-        user = super().save_user(request, sociallogin, form=form)
-        token = request.session.pop(INVITE_SESSION_KEY, None)
-        if token:
-            invite = Invite.objects.filter(token=token).first()
+        with transaction.atomic():
+            invite = _claim_invite(request)
+            user = super().save_user(request, sociallogin, form=form)
             if invite is not None:
                 invite.redeem(user)
+                request.session.pop(INVITE_SESSION_KEY, None)
         return user

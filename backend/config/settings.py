@@ -26,12 +26,14 @@ DEBUG = env.bool("DJANGO_DEBUG", default=False)
 ALLOWED_HOSTS = env.list("DJANGO_ALLOWED_HOSTS", default=["localhost", "127.0.0.1"])
 CSRF_TRUSTED_ORIGINS = env.list("CSRF_TRUSTED_ORIGINS", default=[])
 
-# Always safe to trust: this app is only ever reachable through the
-# frontend nginx container/pod (see frontend/nginx.conf.template), which
-# always sets X-Forwarded-Proto itself -- Django (this process) is never
-# directly internet-facing (no Service/Ingress of its own exposes it), so
-# there's no path for a client to set this header directly and have it
-# trusted here. Needed so request.is_secure() (and therefore secure
+# This app is only ever reachable through the frontend nginx container/pod
+# (see frontend/nginx.conf.template) -- Django (this process) is never
+# directly internet-facing (no Service/Ingress of its own exposes it). That
+# nginx only forwards a real X-Forwarded-Proto when it's explicitly told it
+# sits behind another hop that itself overwrites the header
+# (NGINX_TRUST_FORWARDED_PROTO=true); otherwise it always sets this header
+# from its own connection scheme, so a client can't set it directly and
+# have it trusted here. Needed so request.is_secure() (and therefore secure
 # cookies, SECURE_SSL_REDIRECT below) resolve correctly when TLS actually
 # terminates upstream of this container -- e.g. a Kubernetes Ingress -- and
 # not here.

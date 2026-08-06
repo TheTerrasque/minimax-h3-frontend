@@ -16,14 +16,19 @@
 # $host, $remote_addr) is an nginx runtime variable, not a container env
 # var, so envsubst leaves it untouched.
 
-# Preserves an already-correct X-Forwarded-Proto from an upstream proxy
-# (e.g. a TLS-terminating Kubernetes Ingress in front of this container) --
-# falls back to this container's own $scheme (e.g. plain "http" under
-# docker-compose, which has no TLS-terminating hop in front of it).
-# Without this, a value set by an outer proxy would get silently
-# overwritten below with whatever scheme *this* hop saw, which is wrong
-# whenever TLS terminates upstream of this container instead of here.
-map $http_x_forwarded_proto $proxy_x_forwarded_proto {
+# Whether to trust an inbound X-Forwarded-Proto instead of this container's
+# own $scheme. Only set NGINX_TRUST_FORWARDED_PROTO=true when this container
+# is *only* ever reachable through another hop that itself overwrites this
+# header on every request (e.g. a Kubernetes Ingress terminating TLS in
+# front of it) -- never in this stack's default docker-compose deployment,
+# where this container is the direct internet-facing edge and the header
+# would otherwise just be whatever a client chose to send. Trusting a
+# client-forgeable header here would let a plain-HTTP client claim
+# X-Forwarded-Proto: https, which Django's SECURE_PROXY_SSL_HEADER (see
+# backend/config/settings.py) takes at face value -- silently defeating
+# DJANGO_SECURE_SSL_REDIRECT (and any other is_secure()-gated behavior) the
+# moment it's turned on. Defaults to "false".
+map $http_x_forwarded_proto $forwarded_proto_or_scheme {
     default $http_x_forwarded_proto;
     ''      $scheme;
 }
@@ -54,6 +59,12 @@ server {
         resolver ${NGINX_LOCAL_RESOLVERS} valid=10s;
         set $backend "${BACKEND_SERVICE_HOST}:${BACKEND_SERVICE_PORT}";
         proxy_pass http://$backend;
+
+        set $trust_forwarded_proto "${NGINX_TRUST_FORWARDED_PROTO}";
+        set $proxy_x_forwarded_proto $scheme;
+        if ($trust_forwarded_proto = "true") {
+            set $proxy_x_forwarded_proto $forwarded_proto_or_scheme;
+        }
         # $host drops the port from the incoming Host header (that's how
         # nginx defines it), so when this stack is reached through a
         # non-default port, Django loses track of it too -- allauth then

@@ -22,9 +22,16 @@ COPY nginx.conf.template /etc/nginx/templates/default.conf.template
 # docker-compose.yml service name/port exactly; override them (as
 # container env vars, no rebuild needed) wherever the backend Service is
 # named/ported differently, e.g. a Kubernetes Deployment in another
-# namespace.
+# namespace. NGINX_TRUST_FORWARDED_PROTO defaults to "false" -- this
+# container is the direct internet-facing edge in this stack's default
+# docker-compose deployment, so an inbound X-Forwarded-Proto can't be
+# trusted (a client could set it themselves); only flip it to "true" when
+# this container is guaranteed to sit behind another hop that overwrites
+# that header itself, e.g. a Kubernetes Ingress terminating TLS in front of
+# it (see nginx.conf.template).
 ENV NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1 \
     BACKEND_SERVICE_HOST=backend \
-    BACKEND_SERVICE_PORT=8000
+    BACKEND_SERVICE_PORT=8000 \
+    NGINX_TRUST_FORWARDED_PROTO=false
 COPY --from=build /app/dist /usr/share/nginx/html
 EXPOSE 8080
