@@ -70,6 +70,50 @@ function hasUrl(r: ReferenceAsset): r is ReferenceAsset & { url: string } {
   return r.url != null;
 }
 
+function gcd(a: number, b: number): number {
+  return b === 0 ? a : gcd(b, a % b);
+}
+
+interface MatchedAspectRatio {
+  value: string;
+  label: string;
+}
+
+// Reads an uploaded first-frame image's own pixel dimensions and reduces
+// them to a compact "W:H" ratio string -- lets the aspect-ratio picker offer
+// (and default to) the exact ratio of what's actually being animated,
+// instead of forcing it into the nearest fixed preset. Backend's
+// aspect_ratio column caps at 10 chars ("W:H") and resolution.
+// is_valid_aspect_ratio() bounds each part to 4 digits, so a
+// near-coprime-dimensioned image (rare, but possible) gets scaled down to
+// fit rather than rejected.
+async function computeImageAspectRatio(file: File): Promise<MatchedAspectRatio | null> {
+  const url = URL.createObjectURL(file);
+  try {
+    const { width, height } = await new Promise<{ width: number; height: number }>((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+      img.onerror = () => reject(new Error("Couldn't read image dimensions"));
+      img.src = url;
+    });
+    if (!width || !height) return null;
+    const divisor = gcd(width, height) || 1;
+    let w = Math.round(width / divisor);
+    let h = Math.round(height / divisor);
+    if (w > 999 || h > 999) {
+      const scale = 999 / Math.max(w, h);
+      w = Math.max(1, Math.round(w * scale));
+      h = Math.max(1, Math.round(h * scale));
+    }
+    const value = `${w}:${h}`;
+    return { value, label: `${value} (match first frame)` };
+  } catch {
+    return null;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 // Re-downloads an already-uploaded reference (used by "Redo") and repacks
 // it as a File -- a browser has no way to hand back the original File
 // object for something already uploaded, but the bytes are still sitting
@@ -114,6 +158,9 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
   const [lastFrameKey, setLastFrameKey] = useState(0);
   const [refImages, setRefImages] = useState<File[]>([]);
   const [referenceAudio, setReferenceAudio] = useState<File[]>([]);
+  // The first frame's own aspect ratio, offered (and auto-selected) as an
+  // extra option in the aspect-ratio picker -- see computeImageAspectRatio.
+  const [matchedAspectRatio, setMatchedAspectRatio] = useState<MatchedAspectRatio | null>(null);
 
   const [chatOpen, setChatOpen] = useState(false);
   const chatLogRef = useRef<HTMLDivElement>(null);
@@ -270,6 +317,25 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
     if (aspectRatio != null || !config.data) return;
     setAspectRatio(config.data.default_aspect_ratio);
   }, [config.data, aspectRatio]);
+
+  // i2v's first frame gets its own aspect-ratio option, auto-selected, so
+  // the render actually matches what's being animated instead of forcing it
+  // into the nearest fixed preset -- see computeImageAspectRatio.
+  useEffect(() => {
+    if (mode !== "i2v" || !firstFrame) {
+      setMatchedAspectRatio(null);
+      return;
+    }
+    let cancelled = false;
+    void computeImageAspectRatio(firstFrame).then((ratio) => {
+      if (cancelled || !ratio) return;
+      setMatchedAspectRatio(ratio);
+      setAspectRatio(ratio.value);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, firstFrame]);
 
   const queueEstimate = useQueueEstimate(durationId);
 
@@ -428,6 +494,10 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
               onChange={(e) => setAspectRatio(e.target.value)}
               disabled={!config.data?.aspect_ratios.length}
             >
+              {matchedAspectRatio &&
+                !config.data?.aspect_ratios.some((r) => r.value === matchedAspectRatio.value) && (
+                  <option value={matchedAspectRatio.value}>{matchedAspectRatio.label}</option>
+                )}
               {config.data?.aspect_ratios.map((ratio) => (
                 <option key={ratio.value} value={ratio.value}>
                   {ratio.label}

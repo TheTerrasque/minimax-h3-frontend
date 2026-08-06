@@ -43,7 +43,13 @@ from .models import (
     RenderPreset,
 )
 from .queue import estimated_seconds_ahead, expected_finish_times
-from .resolution import ASPECT_RATIO_VALUES, ASPECT_RATIOS, DEFAULT_ASPECT_RATIO, compute_resolution
+from .resolution import (
+    ASPECT_RATIO_VALUES,
+    ASPECT_RATIOS,
+    DEFAULT_ASPECT_RATIO,
+    compute_resolution,
+    is_valid_aspect_ratio,
+)
 
 
 class HealthResponseSerializer(serializers.Serializer):
@@ -172,9 +178,10 @@ class CreateJobRequestSerializer(serializers.Serializer):
         help_text="A RenderDuration id (see GET /api/presets/'s nested durations) -- this alone "
         "determines the preset (megapixels/steps) and clip length; aspect_ratio is separate."
     )
-    aspect_ratio = serializers.ChoiceField(
-        choices=ASPECT_RATIO_VALUES,
-        help_text="Doesn't affect render time -- see GET /api/config/'s aspect_ratios.",
+    aspect_ratio = serializers.CharField(
+        help_text="One of GET /api/config/'s aspect_ratios values, or a custom \"W:H\" ratio "
+        "(e.g. to match an uploaded first frame -- see is_valid_aspect_ratio()). Doesn't "
+        "affect render time.",
     )
     raw_prompt = serializers.CharField()
     improved_prompt = serializers.CharField(required=False, allow_blank=True)
@@ -559,8 +566,14 @@ def jobs(request):
     preset = duration.preset
 
     aspect_ratio = request.data.get("aspect_ratio")
-    if aspect_ratio not in ASPECT_RATIO_VALUES:
-        return Response({"error": f"aspect_ratio must be one of {ASPECT_RATIO_VALUES}"}, status=400)
+    if not is_valid_aspect_ratio(aspect_ratio):
+        return Response(
+            {
+                "error": f"aspect_ratio must be one of {ASPECT_RATIO_VALUES}, or a custom "
+                '"W:H" ratio (e.g. to match an uploaded first frame).'
+            },
+            status=400,
+        )
 
     raw_prompt = request.data.get("raw_prompt", "")
     if not raw_prompt.strip():

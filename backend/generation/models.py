@@ -159,7 +159,11 @@ class GenerationJob(models.Model):
         "dimension (steps * megapixels * duration_seconds) by the admin catalog's "
         "curve-fit estimator, see generation/admin_api.py.",
     )
-    aspect_ratio = models.CharField(max_length=8, help_text='e.g. "16:9" -- see resolution.ASPECT_RATIOS.')
+    aspect_ratio = models.CharField(
+        max_length=10,
+        help_text='e.g. "16:9" -- see resolution.ASPECT_RATIOS, or a custom "W:H" ratio '
+        "(see resolution.is_valid_aspect_ratio) matching an uploaded first frame.",
+    )
     width = models.PositiveIntegerField(help_text="Computed from megapixels + aspect_ratio at queue time.")
     height = models.PositiveIntegerField(help_text="Computed from megapixels + aspect_ratio at queue time.")
     duration_seconds = models.FloatField(help_text="Snapshot of duration.duration_seconds at queue time.")

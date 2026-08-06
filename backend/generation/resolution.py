@@ -15,6 +15,8 @@ things worth benchmarking.
 
 from __future__ import annotations
 
+import re
+
 # Mirrors ResolutionSelector's own aspect_ratio combo options exactly (see
 # backend/scripts/object_info_cache/ResolutionSelector.json, fetched live
 # from ComfyUI) -- (value, label) pairs, value is what the API/frontend use.
@@ -35,6 +37,28 @@ DEFAULT_ASPECT_RATIO = "16:9"
 # step=32 (confirmed live via /object_info) -- round to that so every
 # resolution we ever send is guaranteed valid regardless of aspect ratio.
 RESOLUTION_MULTIPLE = 32
+
+# A custom "W:H" ratio, distinct from the fixed ASPECT_RATIOS presets above --
+# used by the i2v "match uploaded image" option (see
+# frontend/src/features/generate/GenerateScreen.tsx's firstFrame handling),
+# which computes the actual uploaded first frame's own ratio client-side
+# rather than forcing it into the nearest preset. Digits only, each part
+# 1-4 digits (matches GenerationJob.aspect_ratio's max_length=10).
+_CUSTOM_ASPECT_RATIO_RE = re.compile(r"^\d{1,4}:\d{1,4}$")
+
+
+def is_valid_aspect_ratio(value: str | None) -> bool:
+    """True for one of ASPECT_RATIOS' fixed presets, or a well-formed custom
+    "W:H" ratio within a sane range -- guards against a malformed or
+    degenerate (near-zero or extreme) value producing a nonsensical
+    resolution via compute_resolution() below.
+    """
+    if value in ASPECT_RATIO_VALUES:
+        return True
+    if not value or not _CUSTOM_ASPECT_RATIO_RE.match(value):
+        return False
+    w_ratio, h_ratio = (float(p) for p in value.split(":"))
+    return w_ratio > 0 and h_ratio > 0 and 0.1 <= w_ratio / h_ratio <= 10
 
 
 def compute_resolution(megapixels: float, aspect_ratio: str) -> tuple[int, int]:
