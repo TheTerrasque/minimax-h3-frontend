@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { useDeleteJob, useJob } from "../../api/queries";
 import { MODE_LABELS, type GenerationJobDetail } from "../../api/types";
+import { JobProgressBar } from "./JobProgressBar";
 
 function formatDuration(seconds: number): string {
   if (seconds < 60) return `${Math.round(seconds)}s`;
@@ -27,6 +29,7 @@ interface JobModalProps {
 export function JobModal({ jobId, onClose, onRedo }: JobModalProps) {
   const job = useJob(jobId);
   const deleteJob = useDeleteJob();
+  const [showAiPrompt, setShowAiPrompt] = useState(false);
 
   async function handleDelete() {
     await deleteJob.mutateAsync(jobId);
@@ -52,11 +55,14 @@ export function JobModal({ jobId, onClose, onRedo }: JobModalProps) {
             ) : job.data.status === "done" ? (
               <p className="error">Failed: {job.data.error_message || "no video was produced."}</p>
             ) : (
-              <p className="hint">
-                {job.data.status === "processing" ? "Processing…" : "Queued…"}
-                {job.data.expected_finish_time &&
-                  ` Expected done by ${new Date(job.data.expected_finish_time).toLocaleTimeString()}.`}
-              </p>
+              <>
+                <p className="hint">
+                  {job.data.status === "processing" ? "Processing…" : "Queued…"}
+                  {job.data.expected_finish_time &&
+                    ` Expected done by ${new Date(job.data.expected_finish_time).toLocaleTimeString()}.`}
+                </p>
+                {job.data.status === "processing" && <JobProgressBar job={job.data} />}
+              </>
             )}
 
             <dl className="modal-details">
@@ -64,8 +70,17 @@ export function JobModal({ jobId, onClose, onRedo }: JobModalProps) {
               <dd>{job.data.raw_prompt}</dd>
               {job.data.improved_prompt && (
                 <>
-                  <dt>AI-refined prompt</dt>
-                  <dd>{job.data.improved_prompt}</dd>
+                  <dt>
+                    <button
+                      type="button"
+                      className="link-button"
+                      onClick={() => setShowAiPrompt((v) => !v)}
+                      aria-expanded={showAiPrompt}
+                    >
+                      AI-refined prompt {showAiPrompt ? "▾" : "▸"}
+                    </button>
+                  </dt>
+                  {showAiPrompt && <dd>{job.data.improved_prompt}</dd>}
                 </>
               )}
               <dt>Resolution &amp; length</dt>

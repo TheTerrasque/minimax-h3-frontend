@@ -1,5 +1,10 @@
+import { useEffect, useRef, useState } from "react";
 import { useJobs, useQueueEstimate } from "../../api/queries";
 import { MODE_LABELS, type GenerationJob, type JobStatus } from "../../api/types";
+import { JobProgressBar } from "./JobProgressBar";
+
+const NOTIFY_STORAGE_KEY = "notifyOnJobDone";
+const ACTIVE_STATUSES = new Set<JobStatus>(["queued", "processing"]);
 
 const STATUS_LABELS: Record<JobStatus, string> = {
   queued: "Queued",
@@ -59,6 +64,7 @@ function QueueEntry({ job, onOpen }: { job: GenerationJob; onOpen: () => void })
             </span>
             <span className="queue-entry-time">{relativeTime(job.created_at)}</span>
           </span>
+          {job.status === "processing" && <JobProgressBar job={job} />}
         </span>
       </button>
     </li>
@@ -69,13 +75,70 @@ interface QueueSidebarProps {
   onOpenJob: (jobId: number) => void;
 }
 
+// Persisted in localStorage (not just React state) so the preference
+// survives a reload -- there's no server-side user-settings model for it.
+function useNotifyOnDone(): [boolean, (next: boolean) => void] {
+  const [enabled, setEnabled] = useState(
+    () => typeof Notification !== "undefined" && localStorage.getItem(NOTIFY_STORAGE_KEY) === "true",
+  );
+
+  function set(next: boolean) {
+    if (next && typeof Notification !== "undefined" && Notification.permission === "default") {
+      void Notification.requestPermission().then((permission) => {
+        const granted = permission === "granted";
+        localStorage.setItem(NOTIFY_STORAGE_KEY, String(granted));
+        setEnabled(granted);
+      });
+      return;
+    }
+    localStorage.setItem(NOTIFY_STORAGE_KEY, String(next));
+    setEnabled(next);
+  }
+
+  return [enabled, set];
+}
+
 export function QueueSidebar({ onOpenJob }: QueueSidebarProps) {
   const jobs = useJobs();
   const queueEstimate = useQueueEstimate(null);
+  const [notifyOnDone, setNotifyOnDone] = useNotifyOnDone();
+
+  // Tracks which job ids were active (queued/processing) as of the last
+  // render, so a job disappearing from that set can be detected as a
+  // queued->done transition -- comparing snapshots rather than trusting a
+  // single job's status change event, since polling (useJobs) only hands us
+  // periodic full-list snapshots, not transitions themselves.
+  const previouslyActiveRef = useRef<Set<number>>(new Set());
+  useEffect(() => {
+    const current = jobs.data ?? [];
+    const previouslyActive = previouslyActiveRef.current;
+    if (notifyOnDone && typeof Notification !== "undefined" && Notification.permission === "granted") {
+      for (const job of current) {
+        if (previouslyActive.has(job.id) && !ACTIVE_STATUSES.has(job.status)) {
+          const failed = didJobFail(job);
+          new Notification(failed ? "Generation failed" : "Generation done", {
+            body: titleFor(job),
+            tag: `job-${job.id}`,
+          });
+        }
+      }
+    }
+    previouslyActiveRef.current = new Set(
+      current.filter((job) => ACTIVE_STATUSES.has(job.status)).map((job) => job.id),
+    );
+  }, [jobs.data, notifyOnDone]);
 
   return (
     <aside className="queue-sidebar">
       <h2>Queue</h2>
+      <label className="queue-notify-toggle hint">
+        <input
+          type="checkbox"
+          checked={notifyOnDone}
+          onChange={(e) => setNotifyOnDone(e.target.checked)}
+        />
+        Notify me when a job is done
+      </label>
       {queueEstimate.data && (
         <p className="hint queue-backlog">
           Backlog:{" "}

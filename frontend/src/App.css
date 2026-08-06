@@ -273,7 +273,8 @@ select {
   background: none;
   color: var(--text);
   cursor: pointer;
-  flex-shrink: 0;
+  flex: 1 1 0;
+  text-align: center;
   transition: color 0.15s ease, border-color 0.15s ease;
 }
 
@@ -573,6 +574,18 @@ select {
   color: var(--text-h);
 }
 
+.queue-notify-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+  cursor: pointer;
+}
+
+.queue-notify-toggle input {
+  cursor: pointer;
+}
+
 .queue-backlog {
   margin: 0 0 16px;
 }
@@ -656,6 +669,46 @@ select {
 
 .queue-entry-time {
   white-space: nowrap;
+}
+
+.job-progress {
+  margin-top: 6px;
+}
+
+.job-progress-label {
+  font-size: 12px;
+  color: var(--text);
+  margin-bottom: 3px;
+}
+
+.job-progress-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.job-progress-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+/* No known step count during "preparing"/"finishing" -- a sliding bar still
+   reads as "actively working" rather than a stalled/frozen 0% fill. */
+.job-progress-indeterminate .job-progress-fill {
+  width: 40%;
+  animation: job-progress-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes job-progress-slide {
+  0% {
+    margin-left: -40%;
+  }
+  100% {
+    margin-left: 100%;
+  }
 }
 
 .job-status {
@@ -750,6 +803,20 @@ select {
   margin: 2px 0 0;
   color: var(--text);
   white-space: pre-wrap;
+}
+
+.link-button {
+  font: inherit;
+  font-weight: 600;
+  color: var(--text-h);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.link-button:hover {
+  color: var(--accent);
 }
 
 .modal-actions {
