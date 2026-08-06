@@ -63,7 +63,10 @@ services:
       context: frontend
       dockerfile: Dockerfile
     ports:
-      - "8080:80"
+      # host:container -- container port is 8080, not 80: the frontend
+      # image runs as non-root (nginxinc/nginx-unprivileged), which can't
+      # bind a privileged port.
+      - "8080:8080"
     depends_on:
       - backend
 
