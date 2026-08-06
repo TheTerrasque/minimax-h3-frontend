@@ -6,6 +6,7 @@ from .models import (
     PromptChatMessage,
     PromptChatSession,
     ReferenceAsset,
+    RenderDuration,
     RenderPreset,
 )
 
@@ -16,27 +17,45 @@ class ReferenceAssetInline(admin.TabularInline):
     readonly_fields = ("created_at",)
 
 
+class RenderDurationInline(admin.TabularInline):
+    model = RenderDuration
+    extra = 1
+
+
 @admin.register(RenderPreset)
 class RenderPresetAdmin(admin.ModelAdmin):
-    list_display = (
-        "mode",
-        "width",
-        "height",
-        "duration_seconds",
-        "steps",
-        "estimated_render_seconds",
-        "is_draft",
-        "is_active",
-    )
+    list_display = ("mode", "label", "megapixels", "steps", "is_draft", "is_active", "sort_order")
     list_filter = ("mode", "is_draft", "is_active")
+    inlines = [RenderDurationInline]
 
 
 @admin.register(GenerationJob)
 class GenerationJobAdmin(admin.ModelAdmin):
-    list_display = ("id", "user", "mode", "status", "preset", "created_at", "finished_at")
+    list_display = (
+        "id",
+        "user",
+        "mode",
+        "status",
+        "preset",
+        "width",
+        "height",
+        "duration_seconds",
+        "created_at",
+        "finished_at",
+    )
     list_filter = ("mode", "status")
     search_fields = ("user__username", "raw_prompt", "comfyui_prompt_id")
-    readonly_fields = ("created_at", "started_at", "finished_at", "q_task_id", "comfyui_prompt_id")
+    readonly_fields = (
+        "created_at",
+        "started_at",
+        "finished_at",
+        "q_task_id",
+        "comfyui_prompt_id",
+        "megapixels",
+        "width",
+        "height",
+        "duration_seconds",
+    )
     inlines = [ReferenceAssetInline]
 
 
