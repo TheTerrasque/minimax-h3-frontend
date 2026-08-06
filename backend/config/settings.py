@@ -181,6 +181,26 @@ ACCOUNT_LOGIN_METHODS = {"email"}
 ACCOUNT_SIGNUP_FIELDS = ["email*", "password1*", "password2*"]
 ACCOUNT_EMAIL_VERIFICATION = "optional"
 
+# "optional" above still sends a confirmation email right after signup (and
+# password-reset always does) -- Django's default EMAIL_BACKEND is real SMTP
+# against localhost:25, which crashes the whole request with a 500
+# (ConnectionRefusedError) the moment nothing is listening there, *after*
+# the account was already created (confirmed hitting exactly this in
+# production: signup silently succeeds, but the user's browser shows a 500).
+# Only switch to real SMTP once EMAIL_HOST is actually configured; otherwise
+# fall back to printing the email to the container's logs, so this class of
+# email-sending crash simply can't happen with no mail server configured.
+EMAIL_HOST = env("EMAIL_HOST", default="")
+if EMAIL_HOST:
+    EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+    EMAIL_PORT = env.int("EMAIL_PORT", default=587)
+    EMAIL_HOST_USER = env("EMAIL_HOST_USER", default="")
+    EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", default="")
+    EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=True)
+else:
+    EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="webmaster@localhost")
+
 # Invite-only signup -- see accounts/adapters.py and accounts/models.py::Invite.
 ACCOUNT_ADAPTER = "accounts.adapters.NoSelfSignupAccountAdapter"
 SOCIALACCOUNT_ADAPTER = "accounts.adapters.InviteGatedSocialAccountAdapter"

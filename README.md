@@ -193,6 +193,24 @@ Optional — leave `OIDC_CLIENT_ID` blank to run without OIDC configured yet (yo
 | `OIDC_CLIENT_SECRET` | *(empty)* | OAuth client secret. |
 | `OIDC_AUTO_SIGNUP` | `true` | `true`: completing OIDC login alone creates an account, no invite needed. `false`: OIDC logins need a valid invite too, same as any other new signup. |
 
+### Email (optional)
+
+Local signup ("optional" email verification) and password-reset both send a
+confirmation email. Leave `EMAIL_HOST` blank and these just get printed to
+the container's logs instead of actually sent — fine for local/invite-only
+use. **Without a real EMAIL_HOST or that fallback, Django defaults to real
+SMTP against `localhost:25`, which crashes the request with a 500 the moment
+nothing's listening there — after the account was already created.**
+
+| Variable | Default | Description |
+|---|---|---|
+| `EMAIL_HOST` | *(empty)* | SMTP server hostname. Leave blank to print emails to the logs instead of sending them. |
+| `EMAIL_PORT` | `587` | SMTP port. |
+| `EMAIL_HOST_USER` | *(empty)* | SMTP username. |
+| `EMAIL_HOST_PASSWORD` | *(empty)* | SMTP password. |
+| `EMAIL_USE_TLS` | `true` | Use STARTTLS when talking to the SMTP server. |
+| `DEFAULT_FROM_EMAIL` | `webmaster@localhost` | The `From:` address on outgoing emails. |
+
 ### Background jobs
 
 | Variable | Default | Description |
