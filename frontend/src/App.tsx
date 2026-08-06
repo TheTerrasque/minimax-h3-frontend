@@ -1,28 +1,89 @@
-import { useEffect, useState } from "react";
-import { apiFetch } from "./api/client";
+import { useState } from "react";
+import { Navigate, NavLink, Route, Routes } from "react-router-dom";
+import { useCurrentUser } from "./api/queries";
+import type { GenerationJobDetail } from "./api/types";
+import { AdminLayout, CatalogScreen, InvitesScreen } from "./features/admin";
+import { LoginScreen } from "./features/auth";
+import { GenerateScreen } from "./features/generate";
+import { JobModal, QueueSidebar } from "./features/queue";
 import "./App.css";
 
-// Placeholder shell -- see src/features/{auth,generate,queue}/ for where the
-// real screens land (not built yet, see ARCHITECTURE.md "deferred to next
-// pass"). Pinging /api/health/ here proves the SPA -> nginx -> Django path
-// actually works end to end.
-function App() {
-  const [apiStatus, setApiStatus] = useState<"checking" | "ok" | "error">("checking");
+function MainLayout() {
+  const [selectedJobId, setSelectedJobId] = useState<number | null>(null);
+  const [redoPayload, setRedoPayload] = useState<GenerationJobDetail | null>(null);
 
-  useEffect(() => {
-    apiFetch<{ status: string }>("/health/")
-      .then(() => setApiStatus("ok"))
-      .catch(() => setApiStatus("error"));
-  }, []);
+  function handleRedo(job: GenerationJobDetail) {
+    setRedoPayload(job);
+    setSelectedJobId(null);
+  }
 
   return (
-    <section id="center">
-      <h1>MinimaxH3 Front</h1>
-      <p>Structure/architecture scaffold -- screens land in src/features/.</p>
-      <p>
-        Backend API: <strong>{apiStatus}</strong>
-      </p>
-    </section>
+    <>
+      <div className="app-layout">
+        <GenerateScreen redoJob={redoPayload} onRedoConsumed={() => setRedoPayload(null)} />
+        <QueueSidebar onOpenJob={setSelectedJobId} />
+      </div>
+      {selectedJobId != null && (
+        <JobModal jobId={selectedJobId} onClose={() => setSelectedJobId(null)} onRedo={handleRedo} />
+      )}
+    </>
+  );
+}
+
+function App() {
+  const me = useCurrentUser();
+
+  if (me.isLoading) {
+    return (
+      <section id="center">
+        <p>Loading…</p>
+      </section>
+    );
+  }
+
+  if (me.isError) {
+    return (
+      <section id="center">
+        <p className="error">Couldn't reach the server. Try reloading.</p>
+      </section>
+    );
+  }
+
+  if (!me.data?.authenticated) {
+    return <LoginScreen />;
+  }
+
+  return (
+    <>
+      <nav className="app-nav">
+        <span className="app-title">Minimax H3 Generator</span>
+        {me.data.is_staff && (
+          <div className="app-nav-links">
+            <NavLink to="/" end>
+              Generate
+            </NavLink>
+            <NavLink to="/manage">Admin</NavLink>
+          </div>
+        )}
+        <span className="app-user">
+          {me.data.username} · <a href="/accounts/logout/">Log out</a>
+        </span>
+      </nav>
+      <main>
+        <Routes>
+          <Route path="/" element={<MainLayout />} />
+          <Route
+            path="/manage"
+            element={me.data.is_staff ? <AdminLayout /> : <Navigate to="/" replace />}
+          >
+            <Route index element={<Navigate to="invites" replace />} />
+            <Route path="invites" element={<InvitesScreen />} />
+            <Route path="catalog" element={<CatalogScreen />} />
+          </Route>
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </main>
+    </>
   );
 }
 
