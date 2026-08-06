@@ -264,6 +264,15 @@ select {
 @media (max-width: 900px) {
   .app-layout {
     flex-direction: column;
+    /* align-items:flex-start (base rule) is right for the row layout above
+       -- it keeps the two panes independently sized instead of stretched
+       to match each other's height. But the cross axis flips to width once
+       this switches to a column, and flex-start there means each pane
+       shrink-wraps to its own content instead of filling the container --
+       so any child that can't shrink (e.g. a row of <select>s, or tabs
+       that don't wrap) silently grows the whole pane wider than the
+       viewport instead of being clipped/scrolled within it. */
+    align-items: stretch;
   }
 
   .queue-sidebar {
@@ -509,7 +518,17 @@ select {
   display: flex;
   flex-direction: column;
   height: 640px;
-  max-height: calc(100vh - 48px);
+  /* dvh (dynamic viewport height), not vh -- on mobile, vh is pinned to the
+     layout viewport as if no on-screen keyboard were showing, so opening
+     the keyboard to type a reply wouldn't shrink this at all. Since
+     .chat-input-row sits below the (separately scrollable) .chat-log and
+     this modal itself is overflow:hidden, the keyboard would then just
+     cover the input/Send button with no way to scroll them back into view.
+     dvh tracks the actual visible viewport, keyboard included, in
+     browsers that support it (paired with index.html's
+     interactive-widget=resizes-content for Chromium-based ones) -- same
+     reasoning as index.css's #root using svh instead of vh. */
+  max-height: calc(100dvh - 48px);
   overflow: hidden;
 }
 
@@ -865,7 +884,7 @@ select {
   padding: 24px;
   max-width: 720px;
   width: 100%;
-  max-height: 90vh;
+  max-height: 90dvh;
   overflow-y: auto;
   box-sizing: border-box;
   box-shadow: var(--shadow);
@@ -1396,7 +1415,14 @@ select {
   }
 
   main {
-    padding: 12px;
+    padding: 16px;
+  }
+
+  /* A bit more breathing room between fieldsets (Toolbar/Prompt/Reference
+     sections) now that they're stacked full-width -- at the base 16px gap
+     they read as running into each other on a narrow screen. */
+  fieldset {
+    margin-bottom: 20px;
   }
 
   .login-card {
@@ -1409,8 +1435,38 @@ select {
     padding: 10px 16px;
   }
 
+  /* .tab-strip already has overflow-x:auto with its scrollbar hidden -- a
+     scrollable single-line strip. .tab's flex:1 1 0 (base rule) defeats
+     that on narrow screens by forcing tabs to share the row evenly instead
+     of sizing to their own content, wrapping labels like "Provide
+     references" onto two lines and making the whole strip feel cramped.
+     Let tabs keep their natural width here so the strip scrolls instead. */
   .tab {
+    flex: 0 0 auto;
     padding: 10px 14px;
+    white-space: nowrap;
+  }
+
+  .tab-strip {
+    justify-content: flex-start;
+  }
+
+  /* .toolbar-control's flex-shrink can't go below a <select>'s content
+     width (the default min-width:auto on flex items) -- side by side,
+     Quality/Aspect ratio/Length together are wider than a phone screen, so
+     without this the row silently overflows the viewport instead of
+     wrapping (flex-wrap's line-breaking uses each item's flex-basis, not
+     its content-clamped final size, so it never actually breaks the line).
+     Stacking them one per row sidesteps the shrink math entirely and reads
+     better at this width regardless. */
+  .toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .toolbar-control,
+  .toolbar-control-wide {
+    flex: 1 1 auto;
   }
 
   .modal-overlay {
@@ -1419,8 +1475,12 @@ select {
 
   .modal {
     max-width: none;
-    max-height: 100vh;
-    height: 100vh;
+    /* dvh, not vh -- see .chat-modal's comment above: vh alone would keep
+       this pinned to the keyboard-closed viewport height, so opening the
+       keyboard to type in .chat-modal wouldn't shrink it at all, covering
+       the input/Send button with no way to scroll them back into view. */
+    max-height: 100dvh;
+    height: 100dvh;
     border-radius: 0;
     border-width: 0;
     padding: 16px;
