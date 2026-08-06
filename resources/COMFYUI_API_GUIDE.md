@@ -164,8 +164,11 @@ changed them.
 
 To feed `ref_video_N` / `ref_audio_N` / `ref_video_audio_N`, use ComfyUI's core `LoadVideo` /
 `LoadAudio` nodes (outputting `VIDEO`/`AUDIO`) the same way `LoadImage` is used for `ref_image_N` —
-upload the file first (see §5), then set that node's filename widget to the uploaded name. (Not yet
-implemented in this project's `generation/tasks.py` — only `ref_image_N` is wired so far.)
+upload the file first (see §5), then set that node's filename widget to the uploaded name.
+`ref_audio_N` is wired this way in `generation/tasks.py` (`LoadAudio.inputs.audio`, confirmed
+against live `/object_info/LoadAudio`); `ref_video_N`/`ref_video_audio_N` are not yet — those need
+frame-extraction from the uploaded video first, a different shape than the direct upload→node
+mapping `ref_image_N`/`ref_audio_N` use.
 
 ## 5. Uploading media (images, audio, video) — all through one endpoint
 

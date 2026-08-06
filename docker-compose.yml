@@ -47,7 +47,11 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - media_data:/app/media
-    command: ["python", "manage.py", "qcluster"]
+    # recover_stale_jobs first: a job left PROCESSING by a previous
+    # qcluster restart would otherwise sit stuck until someone happens to
+    # queue a new job (process_queue() also runs it, but only on that
+    # trigger) -- see generation/tasks.py's recover_orphaned_processing_jobs().
+    command: ["sh", "-c", "python manage.py recover_stale_jobs && python manage.py qcluster"]
     depends_on:
       db:
         condition: service_healthy

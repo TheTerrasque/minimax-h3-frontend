@@ -85,6 +85,36 @@ def wait_for_result(
     raise TimeoutError(f"ComfyUI prompt {prompt_id} did not finish within {timeout}s")
 
 
+def get_history(prompt_id: str) -> dict[str, Any] | None:
+    """One-shot check of GET /history/{prompt_id} -- the record if ComfyUI
+    has it (finished, successfully or not), None if it doesn't (still
+    running, never existed, or evicted from history). Unlike
+    wait_for_result(), this never polls/blocks -- used by
+    generation.tasks.recover_orphaned_processing_jobs() to check whether a
+    job that was PROCESSING when the server restarted actually finished
+    while nothing was watching, without re-waiting for something that may
+    already be done.
+    """
+    resp = requests.get(f"{_base_url()}/history/{prompt_id}", timeout=15)
+    resp.raise_for_status()
+    return resp.json().get(prompt_id)
+
+
+def is_prompt_queued(prompt_id: str) -> bool:
+    """Whether prompt_id is still sitting in ComfyUI's own queue (running
+    or pending) right now. Used alongside get_history() during orphaned-job
+    recovery to tell "still genuinely rendering, pick the wait back up"
+    apart from "ComfyUI has no record of this at all anymore" -- those need
+    very different recovery actions.
+    """
+    resp = requests.get(f"{_base_url()}/queue", timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    queued_ids = {entry[1] for entry in data.get("queue_running", [])}
+    queued_ids |= {entry[1] for entry in data.get("queue_pending", [])}
+    return prompt_id in queued_ids
+
+
 def check_for_error(history_record: dict[str, Any]) -> None:
     """Raises ComfyUIExecutionError if the prompt finished with an error
     status (e.g. an out-of-memory error caught by ComfyUI itself rather than
