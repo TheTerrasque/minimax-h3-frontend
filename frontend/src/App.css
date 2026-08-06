@@ -10,11 +10,24 @@
 
 /* Nav */
 
+:root {
+  /* Actual rendered height of .app-nav (padding + content line-box) --
+     referenced by .queue-sidebar's sticky top/max-height below so it clears
+     the nav and its max-height accounts for the space the nav actually
+     occupies. Keep in sync with .app-nav's padding/content if either
+     changes -- min-height below guarantees the nav is never shorter than
+     this (only taller, e.g. if it wraps), which is the safe direction for a
+     max-height calc to be conservative. */
+  --nav-height: 66px;
+}
+
 .app-nav {
   display: flex;
   align-items: center;
   gap: 24px;
   padding: 16px 24px;
+  min-height: var(--nav-height);
+  box-sizing: border-box;
   border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
@@ -563,8 +576,14 @@ select {
   border-left: 1px solid var(--border);
   padding-left: 24px;
   position: sticky;
-  top: 24px;
-  max-height: calc(100vh - 48px);
+  /* Sticks just below the (also-sticky) nav, not 24px from the raw viewport
+     top -- that used to be less than the nav's own height, so the sidebar
+     both hid partly behind the nav when scrolled AND (since max-height
+     didn't subtract the nav's height either) extended past the bottom of
+     the viewport by about that same amount, forcing a page-level scrollbar
+     even on a short page. */
+  top: calc(var(--nav-height) + 24px);
+  max-height: calc(100vh - var(--nav-height) - 48px);
   overflow-y: auto;
 }
 
