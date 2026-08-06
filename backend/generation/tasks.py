@@ -50,7 +50,7 @@ from django.core.files.base import ContentFile
 from django.db import transaction
 from django.utils import timezone
 
-from integrations import comfyui
+from integrations import comfyui, hooks
 
 from .models import GenerationJob, Mode, ReferenceAsset
 
@@ -372,6 +372,11 @@ def _execute_job(job: GenerationJob) -> None:
     process_queue()'s loop keeps working through the rest of the queue
     instead of aborting on the first failure.
     """
+    # See integrations/hooks.py -- e.g. waking a GPU/model server before the
+    # first render of the day. Runs (and, if configured, finishes) before
+    # anything below.
+    hooks.run_hook("PRE_RENDER_HOOK", job=job)
+
     try:
         workflow = _build_workflow_for_job(job)
 
@@ -395,6 +400,11 @@ def _execute_job(job: GenerationJob) -> None:
 
     except Exception as exc:  # noqa: BLE001 -- surfaced to the user via job.error_message
         _mark_job_failed(job, str(exc))
+
+    # job.status is always DONE by this point either way (see this
+    # function's own docstring) -- error_message set/blank distinguishes
+    # success/failure for the hook, same as everywhere else that checks it.
+    hooks.run_hook("POST_RENDER_HOOK", job=job, success=not job.error_message)
 
 
 def recover_orphaned_processing_jobs() -> None:

@@ -262,3 +262,16 @@ LLM_ENABLED = bool(LLM_API_BASE_URL and LLM_MODEL)
 # may error or silently ignore them, and it's real extra bandwidth/tokens
 # either way.
 LLM_VISION_ENABLED = env.bool("LLM_VISION_ENABLED", default=False)
+
+# Optional pre/post hooks around the LLM call and a job's render -- dotted
+# Python paths (same convention as ACCOUNT_ADAPTER above), each resolving to
+# a callable(**context) -- see integrations/hooks.py for the exact context
+# each one gets and run_hook()'s error handling. All four default to unset
+# (no-op). Meant for site-specific glue that doesn't belong in the shipped
+# codebase -- e.g. PRE_LLM_HOOK waking a model server before the first call,
+# or POST_RENDER_HOOK pushing a desktop/phone notification when a render
+# finishes. See backend/hooks_example.py for a starting template.
+PRE_LLM_HOOK = env("PRE_LLM_HOOK", default="")
+POST_LLM_HOOK = env("POST_LLM_HOOK", default="")
+PRE_RENDER_HOOK = env("PRE_RENDER_HOOK", default="")
+POST_RENDER_HOOK = env("POST_RENDER_HOOK", default="")

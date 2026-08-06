@@ -21,6 +21,8 @@ from functools import lru_cache
 import requests
 from django.conf import settings
 
+from integrations import hooks
+
 # r2v uses the multi-reference rewrite format; t2v/i2v share the base guide.
 _GUIDE_FILENAMES = {
     "t2v": "VIDEO_PROMPT_WRITING_GUIDE_base_en.md",
@@ -74,6 +76,12 @@ def _post_chat_completion(messages: list[dict[str, str]]) -> str:
     if not is_configured():
         raise LLMError("No LLM is configured (LLM_API_BASE_URL/LLM_MODEL unset).")
     headers = {"Authorization": f"Bearer {settings.LLM_API_KEY}"} if settings.LLM_API_KEY else {}
+
+    # See integrations/hooks.py -- e.g. waking a model server before the
+    # first call of the day. Runs (and, if configured, finishes) before the
+    # actual request below.
+    hooks.run_hook("PRE_LLM_HOOK", messages=messages)
+
     resp = requests.post(
         f"{settings.LLM_API_BASE_URL.rstrip('/')}/chat/completions",
         headers=headers,
@@ -83,7 +91,11 @@ def _post_chat_completion(messages: list[dict[str, str]]) -> str:
     if resp.status_code >= 400:
         raise LLMError(f"LLM request failed: {resp.text}")
     resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"].strip()
+    reply = resp.json()["choices"][0]["message"]["content"].strip()
+
+    hooks.run_hook("POST_LLM_HOOK", messages=messages, reply=reply)
+
+    return reply
 
 
 def _duration_note(duration_seconds: float | None) -> str:
