@@ -266,8 +266,24 @@ def _claim_next_job() -> GenerationJob | None:
             return None
         job.status = GenerationJob.Status.PROCESSING
         job.started_at = timezone.now()
-        job.save(update_fields=["status", "started_at"])
+        job.phase = GenerationJob.Phase.PREPARING
+        job.save(update_fields=["status", "started_at", "phase"])
     return job
+
+
+def _progress_callback(job_id: int) -> Any:
+    """Returns a callback for comfyui.stream_execution_progress() that
+    writes straight to the DB via an UPDATE (not job.save()) -- there's no
+    in-memory GenerationJob instance worth keeping in sync here, this is
+    purely so QueueSidebar/JobModal's polling picks up live phase/progress.
+    """
+
+    def on_update(phase: str, current: int | None, total: int | None) -> None:
+        GenerationJob.objects.filter(pk=job_id).update(
+            phase=phase, progress_current=current, progress_total=total
+        )
+
+    return on_update
 
 
 def _finish_job_from_history(job: GenerationJob, history_record: dict[str, Any]) -> None:
@@ -285,7 +301,19 @@ def _finish_job_from_history(job: GenerationJob, history_record: dict[str, Any])
     job.video_file.save(output.filename, ContentFile(video_bytes), save=False)
     job.status = GenerationJob.Status.DONE
     job.finished_at = timezone.now()
-    job.save(update_fields=["video_file", "status", "finished_at"])
+    job.phase = ""
+    job.progress_current = None
+    job.progress_total = None
+    job.save(
+        update_fields=[
+            "video_file",
+            "status",
+            "finished_at",
+            "phase",
+            "progress_current",
+            "progress_total",
+        ]
+    )
 
     # Don't leave a copy on the ComfyUI machine now that we have it, and
     # tidy the history entry -- see resources/COMFYUI_API_GUIDE.md #10.
@@ -297,7 +325,19 @@ def _mark_job_failed(job: GenerationJob, error_message: str) -> None:
     job.status = GenerationJob.Status.DONE
     job.error_message = error_message
     job.finished_at = timezone.now()
-    job.save(update_fields=["status", "error_message", "finished_at"])
+    job.phase = ""
+    job.progress_current = None
+    job.progress_total = None
+    job.save(
+        update_fields=[
+            "status",
+            "error_message",
+            "finished_at",
+            "phase",
+            "progress_current",
+            "progress_total",
+        ]
+    )
 
 
 def _execute_job(job: GenerationJob) -> None:
@@ -312,13 +352,24 @@ def _execute_job(job: GenerationJob) -> None:
     """
     try:
         workflow = _build_workflow_for_job(job)
+        nodes = _R2V_NODES if job.mode == Mode.REFERENCE_TO_VIDEO else _T2V_I2V_NODES
 
         client_id = str(uuid.uuid4())
         prompt_id = comfyui.queue_prompt(workflow, client_id)
         job.comfyui_prompt_id = prompt_id
         job.save(update_fields=["comfyui_prompt_id"])
 
-        history_record = comfyui.wait_for_result(prompt_id, timeout=job.estimated_seconds * 3 + 300)
+        timeout = job.estimated_seconds * 3 + 300
+        # Best-effort live phase/progress (see comfyui.stream_execution_progress's
+        # own docstring) -- swallows its own errors and simply returns early if
+        # anything goes wrong, so a WebSocket hiccup never fails the job itself;
+        # the actual result always still comes from wait_for_result()+
+        # check_for_error() below, exactly as before this was added.
+        comfyui.stream_execution_progress(
+            prompt_id, client_id, nodes["sampler"], _progress_callback(job.id), timeout=timeout
+        )
+
+        history_record = comfyui.wait_for_result(prompt_id, timeout=timeout)
         _finish_job_from_history(job, history_record)
 
     except Exception as exc:  # noqa: BLE001 -- surfaced to the user via job.error_message

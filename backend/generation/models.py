@@ -173,6 +173,25 @@ class GenerationJob(models.Model):
         help_text="Snapshot of duration.estimated_render_seconds at queue time."
     )
 
+    class Phase(models.TextChoices):
+        """Sub-state of a PROCESSING job, per ComfyUI's own three-stage
+        execution (model loading/pre-processing, sampler steps, VAE decode/
+        encode/disk write) -- see integrations/comfyui.py's
+        stream_execution_progress(), the only writer of these three fields.
+        Blank while QUEUED/DONE; only ever meaningful mid-render."""
+
+        PREPARING = "preparing", "Preparing"
+        RENDERING = "rendering", "Rendering"
+        FINISHING = "finishing", "Finishing"
+
+    phase = models.CharField(max_length=16, choices=Phase.choices, blank=True, default="")
+    progress_current = models.PositiveIntegerField(
+        null=True, blank=True, help_text="Sampler step reached so far -- only set during Phase.RENDERING."
+    )
+    progress_total = models.PositiveIntegerField(
+        null=True, blank=True, help_text="Total sampler steps for this job -- only set during Phase.RENDERING."
+    )
+
     # Unused since the switch to tasks.process_queue(): one shared Django-Q2
     # task now works through the whole FIFO queue rather than one task per
     # job, so there's no single task id to attribute to a given job anymore.

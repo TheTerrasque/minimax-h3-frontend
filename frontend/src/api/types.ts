@@ -97,6 +97,11 @@ export interface ReferenceAsset {
 // success and failure -- check video_url/error_message to tell them apart.
 export type JobStatus = "queued" | "processing" | "done";
 
+// Sub-state of a "processing" job, per ComfyUI's own three real execution
+// phases -- see backend/integrations/comfyui.py's stream_execution_progress().
+// Blank/null while queued/done; only ever meaningful mid-render.
+export type JobPhase = "" | "preparing" | "rendering" | "finishing";
+
 export interface GenerationJob {
   id: number;
   mode: Mode;
@@ -117,6 +122,10 @@ export interface GenerationJob {
   // Set while queued/processing (computed by walking the FIFO queue); null
   // once done.
   expected_finish_time: string | null;
+  phase: JobPhase;
+  // Only set while phase === "rendering" -- sampler step reached / total steps.
+  progress_current: number | null;
+  progress_total: number | null;
 }
 
 export interface GenerationJobDetail extends GenerationJob {

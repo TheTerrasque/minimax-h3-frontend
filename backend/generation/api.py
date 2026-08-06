@@ -239,6 +239,18 @@ class GenerationJobSerializer(serializers.Serializer):
         help_text="Only set while queued/processing -- computed by walking the FIFO queue "
         "(see generation/queue.py::expected_finish_times()); null once done.",
     )
+    phase = serializers.ChoiceField(
+        choices=GenerationJob.Phase.choices,
+        allow_blank=True,
+        help_text="Sub-state while status=processing (preparing/rendering/finishing), blank "
+        "otherwise -- see integrations/comfyui.py's stream_execution_progress().",
+    )
+    progress_current = serializers.IntegerField(
+        allow_null=True, help_text="Sampler step reached so far -- only set during phase=rendering."
+    )
+    progress_total = serializers.IntegerField(
+        allow_null=True, help_text="Total sampler steps for this job -- only set during phase=rendering."
+    )
 
 
 class GenerationJobDetailSerializer(GenerationJobSerializer):
@@ -470,6 +482,9 @@ def _serialize_job(
         "started_at": job.started_at,
         "finished_at": job.finished_at,
         "expected_finish_time": expected_finish_time,
+        "phase": job.phase,
+        "progress_current": job.progress_current,
+        "progress_total": job.progress_total,
     }
     if detail:
         data.update(

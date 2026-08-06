@@ -8,12 +8,14 @@ API-format workflow JSON and patch it before calling queue_prompt().
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import requests
+import websocket
 from django.conf import settings
 
 
@@ -83,6 +85,87 @@ def wait_for_result(
             return history[prompt_id]
         time.sleep(poll_seconds)
     raise TimeoutError(f"ComfyUI prompt {prompt_id} did not finish within {timeout}s")
+
+
+def stream_execution_progress(
+    prompt_id: str,
+    client_id: str,
+    sampler_node_id: str,
+    on_update: Callable[[str, int | None, int | None], None],
+    timeout: float = 900.0,
+) -> None:
+    """Connects to ComfyUI's `/ws?clientId=...` and calls
+    on_update(phase, current, max) as prompt_id's execution moves through
+    ComfyUI's three real phases (see resources/COMFYUI_API_GUIDE.md #7's
+    "if you want live progress" note): preparing (model loading, pre-nodes),
+    rendering (the sampler's steps), finishing (VAE decode/encode, disk
+    write). phase is one of "preparing"/"rendering"/"finishing"; current/max
+    are only non-None during "rendering" (the sampler's own `progress`
+    messages -- step reached / total steps).
+
+    Phase is inferred purely from node-execution order relative to
+    sampler_node_id, the only node id whose semantic meaning we actually
+    know here: every node ComfyUI executes before we've seen the sampler
+    node counts as "preparing", the sampler node itself is "rendering",
+    anything executed after it is "finishing".
+
+    This is a best-effort side channel purely for progress display -- NOT
+    the source of truth for success/failure or for the actual output.
+    Callers must always separately call wait_for_result() + check_for_error()
+    regardless of how this returns; this function returns (without raising)
+    as soon as the prompt reports fully done (`executing` with node=None),
+    reports an execution_error (letting the caller's own /history check
+    produce the real error, so there's only one place that formats it), or
+    on any connection problem/timeout -- swallowing its own exceptions
+    rather than propagating them, since losing live progress is fine but
+    failing the whole job over a WebSocket hiccup would not be.
+    """
+    ws = None
+    try:
+        ws_url = _base_url().replace("http://", "ws://", 1).replace("https://", "wss://", 1)
+        ws = websocket.create_connection(f"{ws_url}/ws?clientId={client_id}", timeout=10)
+        seen_sampler = False
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            ws.settimeout(max(1.0, deadline - time.monotonic()))
+            try:
+                raw = ws.recv()
+            except websocket.WebSocketTimeoutException:
+                continue
+            if not isinstance(raw, str):
+                continue  # binary frames are preview-image bytes, not JSON events
+            try:
+                message = json.loads(raw)
+            except ValueError:
+                continue
+
+            msg_type = message.get("type")
+            data = message.get("data") or {}
+            this_prompt = data.get("prompt_id")
+            if this_prompt is not None and this_prompt != prompt_id:
+                continue  # shouldn't happen (client_id is per-job), but be defensive
+
+            if msg_type == "executing":
+                node = data.get("node")
+                if node is None:
+                    return  # ComfyUI's own signal that this prompt is fully done
+                if node == sampler_node_id:
+                    seen_sampler = True
+                    on_update("rendering", None, None)
+                else:
+                    on_update("finishing" if seen_sampler else "preparing", None, None)
+            elif msg_type == "progress" and data.get("node") == sampler_node_id:
+                on_update("rendering", data.get("value"), data.get("max"))
+            elif msg_type == "execution_error":
+                return
+    except Exception:
+        return
+    finally:
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
 
 
 def get_history(prompt_id: str) -> dict[str, Any] | None:
