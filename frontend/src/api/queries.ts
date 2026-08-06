@@ -140,6 +140,9 @@ export interface ChatReplyInput {
   /** The user's current draft in the main prompt box, if any -- given to
    * the LLM as context even on the first turn. */
   rawPrompt?: string;
+  /** The currently-active AI-refined prompt, if any -- given to the LLM as
+   * separate, clearly-labeled context distinct from rawPrompt. */
+  improvedPrompt?: string;
   referenceLabels?: string[];
   /** Currently-staged reference images. Only actually used by the LLM when
    * the backend has LLM_VISION_ENABLED -- harmless (ignored) otherwise, but
@@ -155,6 +158,7 @@ export function useChatReply() {
       form.set("history", JSON.stringify(input.history));
       form.set("content", input.content);
       if (input.rawPrompt) form.set("raw_prompt", input.rawPrompt);
+      if (input.improvedPrompt) form.set("improved_prompt", input.improvedPrompt);
       for (const label of input.referenceLabels ?? []) form.append("reference_labels", label);
       for (const file of input.referenceImages ?? []) form.append("reference_images", file);
       return apiFetch<ChatMessage>("/prompt/chat/", { method: "POST", body: form });

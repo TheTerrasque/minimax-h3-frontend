@@ -126,6 +126,12 @@ class ChatRequestSerializer(serializers.Serializer):
         help_text="The user's current draft in the main prompt box, if any -- given to the "
         "LLM as context even before they've sent it as a chat message.",
     )
+    improved_prompt = serializers.CharField(
+        required=False, allow_blank=True,
+        help_text="The currently-active AI-refined prompt, if any -- given to the LLM as "
+        "separate, clearly-labeled context distinct from raw_prompt so it knows what the "
+        "user is actually looking at right now.",
+    )
     reference_labels = serializers.ListField(child=serializers.CharField(), required=False)
     reference_images = serializers.ListField(
         child=serializers.FileField(),
@@ -365,6 +371,7 @@ def chat_message(request):
         return Response({"error": "history must be a JSON array."}, status=400)
 
     raw_prompt = request.data.get("raw_prompt", "")
+    improved_prompt = request.data.get("improved_prompt", "")
     reference_labels = request.data.getlist("reference_labels") or None
 
     reference_images = None
@@ -378,7 +385,12 @@ def chat_message(request):
 
     try:
         reply = llm.chat_reply(
-            mode, full_history, reference_labels, raw_prompt=raw_prompt, reference_images=reference_images
+            mode,
+            full_history,
+            reference_labels,
+            raw_prompt=raw_prompt,
+            reference_images=reference_images,
+            improved_prompt=improved_prompt,
         )
     except llm.LLMError as exc:
         return Response({"error": str(exc)}, status=502)

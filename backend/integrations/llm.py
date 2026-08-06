@@ -112,6 +112,7 @@ def chat_reply(
     reference_labels: list[str] | None = None,
     raw_prompt: str = "",
     reference_images: list[tuple[bytes, str]] | None = None,
+    improved_prompt: str = "",
 ) -> str:
     """Multi-turn conversational prompt crafting -- backs the interactive
     chat feature. Entirely stateless: nothing here reads or writes
@@ -128,6 +129,12 @@ def chat_reply(
     given as system-message context so the assistant knows about it even on
     the very first turn, before the user repeats themselves in the chat.
 
+    improved_prompt: the currently-active AI-refined prompt shown to the
+    user (from a prior "AI refine" click or an earlier chat turn), if any --
+    given as separate, clearly-labeled context so the assistant knows what
+    the user is actually looking at right now and can revise *that* instead
+    of drifting back to raw_prompt or re-deriving from scratch.
+
     reference_images: (bytes, content_type) pairs for the currently-staged
     reference images, resent with every call (the caller already has them
     in memory client-side, so this is cheap) and attached to the latest
@@ -142,6 +149,13 @@ def chat_reply(
         f"\n\nThe user's current draft prompt in the main text box (not yet part of this "
         f"conversation -- they haven't sent it as a chat message): {raw_prompt.strip()}"
         if raw_prompt.strip()
+        else ""
+    )
+    improved_note = (
+        f"\n\nThe current AI prompt -- the AI-refined prompt the user already has in hand "
+        f"(from a prior refine or chat turn), shown to them right now and what will actually "
+        f"be rendered unless they change it: {improved_prompt.strip()}"
+        if improved_prompt.strip()
         else ""
     )
     system_message = {
@@ -161,7 +175,7 @@ def chat_reply(
             "user as a one-click action, so it must contain the prompt text alone (no labels, "
             "no commentary) whenever you use it. The rest of your reply (questions, suggestions, "
             "explanations) goes outside that block, as normal.\n\n"
-            f"{_reference_note(reference_labels)}{draft_note}\n\n{guide}"
+            f"{_reference_note(reference_labels)}{draft_note}{improved_note}\n\n{guide}"
         ),
     }
     messages = [system_message, *history]

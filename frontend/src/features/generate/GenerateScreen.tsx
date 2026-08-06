@@ -381,6 +381,7 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
         history,
         content,
         rawPrompt,
+        improvedPrompt,
         referenceLabels,
         referenceImages: config.data?.llm_vision_enabled ? referenceImages : undefined,
       });
