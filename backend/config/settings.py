@@ -138,6 +138,12 @@ MEDIA_ROOT = BASE_DIR / "media"
 AUTH_USER_MODEL = "accounts.User"
 SITE_ID = 1
 
+# Both default to "/accounts/profile/", which doesn't exist here (Django
+# serves a pure API + SPA, not server-rendered account pages) -- send the
+# browser back to the SPA instead, both after login and after logout.
+LOGIN_REDIRECT_URL = "/"
+ACCOUNT_LOGOUT_REDIRECT_URL = "/"
+
 AUTHENTICATION_BACKENDS = [
     "django.contrib.auth.backends.ModelBackend",
     "allauth.account.auth_backends.AuthenticationBackend",
@@ -207,14 +213,19 @@ SPECTACULAR_SETTINGS = {
 }
 
 
-# Django-Q2 -- ORM broker, no Redis/RabbitMQ. Multiple workers is fine even
-# though ComfyUI itself only renders one job at a time: it serializes
-# /prompt submissions on its own end regardless of how many workers here are
-# concurrently polling for results (see resources/COMFYUI_API_GUIDE.md #7).
+# Django-Q2 -- ORM broker, no Redis/RabbitMQ. Deliberately 1 worker: jobs
+# are meant to be processed strictly one at a time, FIFO (see
+# generation/tasks.py's process_queue()/module docstring) -- that ordering
+# and one-at-a-time-ness is enforced there by an explicit DB claim query,
+# not by Django-Q2 itself (its ORM broker's dequeue has no ORDER BY, so
+# task pickup order isn't otherwise guaranteed), but a second worker slot
+# would let two *different* jobs run in parallel regardless of claim order,
+# which the DB-level row locking alone doesn't prevent. Don't raise this
+# without redesigning that.
 Q_CLUSTER = {
     "name": "mm_h3",
     "orm": "default",
-    "workers": env.int("Q_CLUSTER_WORKERS", default=4),
+    "workers": env.int("Q_CLUSTER_WORKERS", default=1),
     "timeout": 1200,
     "retry": 1500,
     "queue_limit": 50,
@@ -231,9 +242,23 @@ COMFYUI_BASE_URL = env("COMFYUI_BASE_URL", default="http://host.docker.internal:
 COMFYUI_OUTPUT_ROOT = env("COMFYUI_OUTPUT_ROOT", default="")
 
 LLM_API_BASE_URL = env("LLM_API_BASE_URL", default="")
+# Optional -- many self-hosted OpenAI-compatible servers (llama.cpp server,
+# LM Studio, text-generation-webui, vLLM in permissive mode, etc.) don't
+# require one at all. Sent as a Bearer token only when actually set (see
+# integrations/llm._post_chat_completion()).
 LLM_API_KEY = env("LLM_API_KEY", default="")
 LLM_MODEL = env("LLM_MODEL", default="")
-# LLM integration is entirely optional -- when any of the three above are
-# unset, no AI features (refine button, chat) should be offered at all. The
+# LLM integration is entirely optional -- when either of the two *required*
+# vars above (base URL, model) is unset, no AI features (refine button,
+# chat) should be offered at all. LLM_API_KEY is deliberately not part of
+# this gate -- it's optional, not required, see its own comment above. The
 # frontend reads this via GET /api/config/; see integrations/llm.is_configured().
-LLM_ENABLED = bool(LLM_API_BASE_URL and LLM_API_KEY and LLM_MODEL)
+LLM_ENABLED = bool(LLM_API_BASE_URL and LLM_MODEL)
+
+# Off by default -- sends actual reference image bytes to the LLM as vision
+# content parts (see integrations/llm.chat_reply()) instead of just their
+# <Picture N> labels. Only turn this on if LLM_MODEL is actually a
+# vision-capable model; a text-only model receiving image_url content parts
+# may error or silently ignore them, and it's real extra bandwidth/tokens
+# either way.
+LLM_VISION_ENABLED = env.bool("LLM_VISION_ENABLED", default=False)
