@@ -1,6 +1,4 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
   useChatReply,
   useConfig,
@@ -16,7 +14,7 @@ import {
   type Mode,
   type ReferenceAsset,
 } from "../../api/types";
-import { parseChatMessage } from "./chatMarkdown";
+import { ChatModal } from "./ChatModal";
 
 const MODES: Mode[] = ["t2v", "i2v", "r2v"];
 
@@ -163,7 +161,6 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
   const [matchedAspectRatio, setMatchedAspectRatio] = useState<MatchedAspectRatio | null>(null);
 
   const [chatOpen, setChatOpen] = useState(false);
-  const chatLogRef = useRef<HTMLDivElement>(null);
   // Which redo's async reference-restore is currently "live" -- see the
   // redo effect below. Not a plain cleanup-based cancel flag: calling
   // onRedoConsumed() sets the redoJob prop back to null as part of the
@@ -181,13 +178,6 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
   const refinePrompt = useRefinePrompt();
   const chatReply = useChatReply();
   const createJob = useCreateJob();
-
-  // Keep the chat log scrolled to the latest message/typing indicator --
-  // otherwise "AI is typing" feedback can end up below the fold, invisible.
-  useEffect(() => {
-    const el = chatLogRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [chatMessages, chatReply.isPending]);
 
   // Reset mode-specific state whenever the mode changes -- a preset/reference
   // picked for one mode isn't meaningful for another. (aspectRatio is NOT
@@ -719,76 +709,6 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
           )}
         </fieldset>
 
-        {chatOpen && (
-          <fieldset className="chat-panel">
-            <legend>Prompt chat</legend>
-            <div className="chat-log" ref={chatLogRef}>
-              {chatMessages.map((m, i) => {
-                if (m.role === "user") {
-                  return (
-                    <div key={i} className="chat-message chat-user">
-                      <strong>You:</strong> {m.content}
-                    </div>
-                  );
-                }
-                const { text, finalPrompt } = parseChatMessage(m.content);
-                return (
-                  <div key={i} className="chat-message chat-assistant">
-                    <strong>AI:</strong>
-                    {text && (
-                      <div className="chat-markdown">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
-                      </div>
-                    )}
-                    {finalPrompt && (
-                      <div className="final-prompt-card">
-                        <p className="hint">Suggested prompt:</p>
-                        <pre className="final-prompt-text">{finalPrompt}</pre>
-                        <button type="button" onClick={() => setImprovedPrompt(finalPrompt)}>
-                          Use as AI-refined prompt
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-              {chatReply.isPending && (
-                <div className="chat-message chat-assistant chat-typing">
-                  <strong>AI:</strong>
-                  <span className="typing-dots" aria-label="AI is typing">
-                    <span></span>
-                    <span></span>
-                    <span></span>
-                  </span>
-                </div>
-              )}
-            </div>
-            {chatReply.isError && <p className="error">Message failed to send. Try again.</p>}
-            <div className="chat-input-row">
-              <input
-                type="text"
-                value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                placeholder="Ask the AI to help draft your prompt…"
-                disabled={chatReply.isPending}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    void handleSendChat();
-                  }
-                }}
-              />
-              <button
-                type="button"
-                onClick={handleSendChat}
-                disabled={chatReply.isPending || !chatInput.trim()}
-              >
-                {chatReply.isPending ? "Sending…" : "Send"}
-              </button>
-            </div>
-          </fieldset>
-        )}
-
         {queueEstimate.data && (
           <p className="hint">
             This render: ~{formatDuration(queueEstimate.data.additional_seconds)}.{" "}
@@ -805,6 +725,19 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
           {createJob.isPending ? "Queuing…" : "Queue video"}
         </button>
       </form>
+
+      {chatOpen && (
+        <ChatModal
+          messages={chatMessages}
+          input={chatInput}
+          onInputChange={setChatInput}
+          onSend={() => void handleSendChat()}
+          isPending={chatReply.isPending}
+          isError={chatReply.isError}
+          onUseAsPrompt={setImprovedPrompt}
+          onClose={() => setChatOpen(false)}
+        />
+      )}
     </section>
   );
 }

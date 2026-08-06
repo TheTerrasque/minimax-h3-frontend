@@ -453,13 +453,31 @@ select {
 
 /* Chat */
 
-.chat-panel .chat-log {
+.chat-modal {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  max-height: 260px;
+  height: 640px;
+  max-height: calc(100vh - 48px);
+  overflow: hidden;
+}
+
+.chat-modal h2 {
+  flex-shrink: 0;
+}
+
+.chat-modal .chat-log {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
   overflow-y: auto;
-  margin-bottom: 12px;
+  margin: 12px 0;
+  padding-right: 4px;
+}
+
+.chat-modal .error,
+.chat-modal .chat-input-row {
+  flex-shrink: 0;
 }
 
 .chat-message {
