@@ -8,21 +8,57 @@ import {
   useRefinePrompt,
 } from "../../api/queries";
 import {
+  CONTENT_TYPE_BY_MODE,
   MODE_LABELS,
+  MODES_BY_CONTENT_TYPE,
   type ChatMessage,
+  type ContentType,
   type GenerationJobDetail,
   type Mode,
   type ReferenceAsset,
 } from "../../api/types";
 import { ChatModal } from "./ChatModal";
 
-const MODES: Mode[] = ["t2v", "i2v", "r2v"];
+const CONTENT_TYPES: ContentType[] = ["video", "image", "audio"];
+const CONTENT_TYPE_LABELS: Record<ContentType, string> = {
+  video: "Video",
+  image: "Image",
+  audio: "Audio",
+};
+const CONTENT_TYPE_NOUN: Record<ContentType, string> = {
+  video: "video",
+  image: "image",
+  audio: "audio",
+};
+
+// Only r2v/r2i/r2a actually take reference uploads (see api.py's
+// _MAX_REFERENCE_IMAGES/_MAX_REFERENCE_AUDIO below) -- i2v is its own
+// separate first/last-frame flow, not a "reference" one.
+const REFERENCE_FLOW_MODES: Mode[] = ["r2v", "r2i", "r2a"];
 
 // Mirrors generation/api.py's _MAX_REFERENCE_IMAGES/_MAX_REFERENCE_AUDIO --
 // what tasks.py actually wires into the ComfyUI workflow per mode (see
-// ARCHITECTURE.md).
-const MAX_REFERENCE_IMAGES: Record<Mode, number> = { t2v: 0, i2v: 2, r2v: 9 };
-const MAX_REFERENCE_AUDIO: Record<Mode, number> = { t2v: 0, i2v: 0, r2v: 3 };
+// ARCHITECTURE.md). r2i gets 0 reference audio -- a still frame extracted
+// from the underlying render can't carry it, so offering the upload would
+// just be confusing (see backend's own comment on this).
+const MAX_REFERENCE_IMAGES: Record<Mode, number> = {
+  t2v: 0,
+  i2v: 2,
+  r2v: 9,
+  t2i: 0,
+  r2i: 9,
+  t2a: 0,
+  r2a: 9,
+};
+const MAX_REFERENCE_AUDIO: Record<Mode, number> = {
+  t2v: 0,
+  i2v: 0,
+  r2v: 3,
+  t2i: 0,
+  r2i: 0,
+  t2a: 0,
+  r2a: 3,
+};
 
 function formatDuration(seconds: number): string {
   if (seconds < 60) return `${Math.round(seconds)}s`;
@@ -135,6 +171,9 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
   const config = useConfig();
 
   const [mode, setMode] = useState<Mode>("t2v");
+  // Derived, not separate state -- mode is the single source of truth, and
+  // every mode belongs to exactly one content type (see CONTENT_TYPE_BY_MODE).
+  const contentType = CONTENT_TYPE_BY_MODE[mode];
   const presets = usePresets(mode);
   const [presetId, setPresetId] = useState<number | null>(null);
   const [durationId, setDurationId] = useState<number | null>(null);
@@ -226,7 +265,7 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
           if (activeRedoIdRef.current !== redoId) return; // superseded by a newer redo
           setFirstFrame(firstFile);
           setLastFrame(lastFile);
-        } else if (redoJob.mode === "r2v") {
+        } else if (REFERENCE_FLOW_MODES.includes(redoJob.mode)) {
           const [imageFiles, audioFiles] = await Promise.all([
             Promise.all(images.map(fetchAsFile)),
             Promise.all(audioRefs.map(fetchAsFile)),
@@ -344,13 +383,14 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
 
   const referenceImages = useMemo<File[]>(() => {
     if (mode === "i2v") return [firstFrame, lastFrame].filter((f): f is File => f != null);
-    if (mode === "r2v") return refImages;
+    if (REFERENCE_FLOW_MODES.includes(mode)) return refImages;
     return [];
   }, [mode, firstFrame, lastFrame, refImages]);
 
   const referenceLabels = useMemo(() => {
     const imageLabels = referenceImages.map((_, i) => `Picture ${i + 1}`);
-    const audioLabels = mode === "r2v" ? referenceAudio.map((_, i) => `Audio ${i + 1}`) : [];
+    const audioLabels =
+      MAX_REFERENCE_AUDIO[mode] > 0 ? referenceAudio.map((_, i) => `Audio ${i + 1}`) : [];
     return [...imageLabels, ...audioLabels];
   }, [referenceImages, referenceAudio, mode]);
 
@@ -432,7 +472,7 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
       rawPrompt,
       improvedPrompt: improvedPrompt || undefined,
       referenceImages,
-      referenceAudio: mode === "r2v" ? referenceAudio : undefined,
+      referenceAudio: MAX_REFERENCE_AUDIO[mode] > 0 ? referenceAudio : undefined,
       chatTranscript: chatMessages.length ? chatMessages : undefined,
     });
     setRawPrompt("");
@@ -455,19 +495,21 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
   return (
     <section className="generate-screen">
       <div className="tab-strip content-tabs" role="tablist" aria-label="Content type">
-        <button type="button" className="tab selected" aria-selected="true">
-          Video
-        </button>
-        <button type="button" className="tab" disabled title="Coming soon">
-          Image
-        </button>
-        <button type="button" className="tab" disabled title="Coming soon">
-          Audio
-        </button>
+        {CONTENT_TYPES.map((ct) => (
+          <button
+            key={ct}
+            type="button"
+            className={`tab ${contentType === ct ? "selected" : ""}`}
+            aria-selected={contentType === ct}
+            onClick={() => setMode(MODES_BY_CONTENT_TYPE[ct][0])}
+          >
+            {CONTENT_TYPE_LABELS[ct]}
+          </button>
+        ))}
       </div>
 
       <div className="tab-strip mode-tabs" role="tablist" aria-label="Generation mode">
-        {MODES.map((m) => (
+        {MODES_BY_CONTENT_TYPE[contentType].map((m) => (
           <button
             key={m}
             type="button"
@@ -498,42 +540,46 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
             </select>
           </label>
 
-          <label className="toolbar-control">
-            <span>Aspect ratio</span>
-            <select
-              value={aspectRatio ?? ""}
-              onChange={(e) => setAspectRatio(e.target.value)}
-              disabled={!config.data?.aspect_ratios.length}
-            >
-              {matchedAspectRatio &&
-                !config.data?.aspect_ratios.some((r) => r.value === matchedAspectRatio.value) && (
-                  <option value={matchedAspectRatio.value}>{matchedAspectRatio.label}</option>
-                )}
-              {config.data?.aspect_ratios.map((ratio) => (
-                <option key={ratio.value} value={ratio.value}>
-                  {ratio.label}
-                </option>
-              ))}
-            </select>
-          </label>
+          {contentType !== "audio" && (
+            <label className="toolbar-control">
+              <span>Aspect ratio</span>
+              <select
+                value={aspectRatio ?? ""}
+                onChange={(e) => setAspectRatio(e.target.value)}
+                disabled={!config.data?.aspect_ratios.length}
+              >
+                {matchedAspectRatio &&
+                  !config.data?.aspect_ratios.some((r) => r.value === matchedAspectRatio.value) && (
+                    <option value={matchedAspectRatio.value}>{matchedAspectRatio.label}</option>
+                  )}
+                {config.data?.aspect_ratios.map((ratio) => (
+                  <option key={ratio.value} value={ratio.value}>
+                    {ratio.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
 
-          <label className="toolbar-control toolbar-control-wide">
-            <span>
-              Length: {selectedDuration ? `${selectedDuration.duration_seconds}s` : "—"}
-              {selectedDuration && (
-                <> (~{formatDuration(selectedDuration.estimated_render_seconds)} to render)</>
-              )}
-            </span>
-            <input
-              type="range"
-              min={0}
-              max={Math.max(durations.length - 1, 0)}
-              step={1}
-              value={selectedDurationIndex}
-              disabled={durations.length < 2}
-              onChange={(e) => setDurationId(durations[Number(e.target.value)]?.id ?? null)}
-            />
-          </label>
+          {contentType !== "image" && (
+            <label className="toolbar-control toolbar-control-wide">
+              <span>
+                Length: {selectedDuration ? `${selectedDuration.duration_seconds}s` : "—"}
+                {selectedDuration && (
+                  <> (~{formatDuration(selectedDuration.estimated_render_seconds)} to render)</>
+                )}
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={Math.max(durations.length - 1, 0)}
+                step={1}
+                value={selectedDurationIndex}
+                disabled={durations.length < 2}
+                onChange={(e) => setDurationId(durations[Number(e.target.value)]?.id ?? null)}
+              />
+            </label>
+          )}
         </div>
 
         {mode === "i2v" && (
@@ -582,7 +628,7 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
           </fieldset>
         )}
 
-        {mode === "r2v" && (
+        {REFERENCE_FLOW_MODES.includes(mode) && (
           <>
             <fieldset>
               <legend>
@@ -625,43 +671,45 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
               )}
             </fieldset>
 
-            <fieldset>
-              <legend>
-                Reference audio ({referenceAudio.length}/{maxAudio})
-              </legend>
-              <p className="hint">Add audio clips, then insert their token into your prompt.</p>
-              {referenceAudio.length > 0 && (
-                <ul className="reference-list">
-                  {referenceAudio.map((file, i) => (
-                    <li key={i} className="reference-item">
-                      <span>
-                        Audio {i + 1}: {file.name}
-                      </span>
-                      <button type="button" onClick={() => insertToken(`<Audio ${i + 1}>`)}>
-                        Insert token
-                      </button>
-                      <button type="button" onClick={() => handleRemoveRefAudio(i)}>
-                        Remove
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-              {referenceAudio.length < maxAudio && (
-                <label className="file-slot">
-                  Add reference audio
-                  <input
-                    type="file"
-                    accept="audio/*"
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (file) setReferenceAudio((prev) => [...prev, file]);
-                      e.target.value = "";
-                    }}
-                  />
-                </label>
-              )}
-            </fieldset>
+            {maxAudio > 0 && (
+              <fieldset>
+                <legend>
+                  Reference audio ({referenceAudio.length}/{maxAudio})
+                </legend>
+                <p className="hint">Add audio clips, then insert their token into your prompt.</p>
+                {referenceAudio.length > 0 && (
+                  <ul className="reference-list">
+                    {referenceAudio.map((file, i) => (
+                      <li key={i} className="reference-item">
+                        <span>
+                          Audio {i + 1}: {file.name}
+                        </span>
+                        <button type="button" onClick={() => insertToken(`<Audio ${i + 1}>`)}>
+                          Insert token
+                        </button>
+                        <button type="button" onClick={() => handleRemoveRefAudio(i)}>
+                          Remove
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {referenceAudio.length < maxAudio && (
+                  <label className="file-slot">
+                    Add reference audio
+                    <input
+                      type="file"
+                      accept="audio/*"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) setReferenceAudio((prev) => [...prev, file]);
+                        e.target.value = "";
+                      }}
+                    />
+                  </label>
+                )}
+              </fieldset>
+            )}
           </>
         )}
 
@@ -673,7 +721,7 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
             autoFocus
             value={rawPrompt}
             onChange={(e) => setRawPrompt(e.target.value)}
-            placeholder="Describe the video you want…"
+            placeholder={`Describe the ${CONTENT_TYPE_NOUN[contentType]} you want…`}
           />
           {config.data?.llm_enabled && (
             <div className="prompt-actions">
@@ -722,7 +770,7 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
         {createJob.isError && <p className="error">Couldn't queue that job. Try again.</p>}
 
         <button type="submit" className="button button-primary" disabled={!canSubmit}>
-          {createJob.isPending ? "Queuing…" : "Queue video"}
+          {createJob.isPending ? "Queuing…" : `Queue ${CONTENT_TYPE_NOUN[contentType]}`}
         </button>
       </form>
 

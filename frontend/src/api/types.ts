@@ -1,12 +1,39 @@
 // Shapes returned by backend/generation/api.py and backend/accounts/api.py --
 // see ARCHITECTURE.md's "Backend apps" section for what each field means.
 
-export type Mode = "t2v" | "i2v" | "r2v";
+export type Mode = "t2v" | "i2v" | "r2v" | "t2i" | "r2i" | "t2a" | "r2a";
 
 export const MODE_LABELS: Record<Mode, string> = {
   t2v: "Video from text",
   i2v: "Provide first frame",
   r2v: "Provide references",
+  t2i: "Image from text",
+  r2i: "Provide references",
+  t2a: "Audio from text",
+  r2a: "Provide references",
+};
+
+// Which tab/output kind a mode belongs to -- see backend/generation/models.py's
+// Mode docstring: image/audio modes reuse the video workflows and derive
+// their actual output via ffmpeg, so despite the name GenerationJob.video_url
+// isn't always a video -- content_type says which <video>/<img>/<audio> tag
+// to render it with.
+export type ContentType = "video" | "image" | "audio";
+
+export const CONTENT_TYPE_BY_MODE: Record<Mode, ContentType> = {
+  t2v: "video",
+  i2v: "video",
+  r2v: "video",
+  t2i: "image",
+  r2i: "image",
+  t2a: "audio",
+  r2a: "audio",
+};
+
+export const MODES_BY_CONTENT_TYPE: Record<ContentType, Mode[]> = {
+  video: ["t2v", "i2v", "r2v"],
+  image: ["t2i", "r2i"],
+  audio: ["t2a", "r2a"],
 };
 
 export interface AspectRatioOption {
@@ -105,6 +132,7 @@ export type JobPhase = "" | "preparing" | "rendering" | "finishing";
 export interface GenerationJob {
   id: number;
   mode: Mode;
+  content_type: ContentType;
   status: JobStatus;
   raw_prompt: string;
   preset_id: number;

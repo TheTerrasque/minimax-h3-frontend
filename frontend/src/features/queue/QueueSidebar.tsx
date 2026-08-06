@@ -40,19 +40,27 @@ function relativeTime(iso: string): string {
   return new Date(iso).toLocaleDateString();
 }
 
+function QueueThumb({ job }: { job: GenerationJob }) {
+  if (job.status === "done" && job.video_url) {
+    if (job.content_type === "video") return <video src={job.video_url} muted preload="metadata" />;
+    if (job.content_type === "image") return <img src={job.video_url} alt="" />;
+    // Audio has no useful tiny-thumbnail rendering (an <audio> element is a
+    // full player, not an image) -- falls through to the placeholder below.
+  }
+  return (
+    <span className="queue-entry-placeholder" aria-hidden="true">
+      {job.status === "done" && job.video_url && job.content_type === "audio" ? "♪" : MODE_LABELS[job.mode][0]}
+    </span>
+  );
+}
+
 function QueueEntry({ job, onOpen }: { job: GenerationJob; onOpen: () => void }) {
   const failed = didJobFail(job);
   return (
     <li className={`queue-entry status-${job.status}`}>
       <button type="button" className="queue-entry-button" onClick={onOpen}>
         <span className="queue-entry-thumb">
-          {job.status === "done" && job.video_url ? (
-            <video src={job.video_url} muted preload="metadata" />
-          ) : (
-            <span className="queue-entry-placeholder" aria-hidden="true">
-              {MODE_LABELS[job.mode][0]}
-            </span>
-          )}
+          <QueueThumb job={job} />
         </span>
         <span className="queue-entry-body">
           <span className="queue-entry-title">{titleFor(job)}</span>

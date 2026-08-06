@@ -20,6 +20,17 @@ function renderTimeLabel(job: GenerationJobDetail): string {
   return `~${formatDuration(job.estimated_seconds)} (estimated)`;
 }
 
+// Resolution is fixed/meaningless for audio (visual output is discarded --
+// see backend's Mode docstring) and duration is pinned near-zero for image
+// (only frame 0 is kept), so each content type only shows the axis that
+// actually means something for it.
+function resolutionLabel(job: GenerationJobDetail): string {
+  const resolution = `${job.width}×${job.height} (${job.aspect_ratio}, ${job.megapixels}MP)`;
+  if (job.content_type === "video") return `${resolution} — ${job.duration_seconds}s`;
+  if (job.content_type === "image") return resolution;
+  return `${job.duration_seconds}s`;
+}
+
 interface JobModalProps {
   jobId: number;
   onClose: () => void;
@@ -51,9 +62,15 @@ export function JobModal({ jobId, onClose, onRedo }: JobModalProps) {
             <h2>{MODE_LABELS[job.data.mode]}</h2>
 
             {job.data.status === "done" && job.data.video_url ? (
-              <video src={job.data.video_url} controls className="modal-video" />
+              job.data.content_type === "video" ? (
+                <video src={job.data.video_url} controls className="modal-video" />
+              ) : job.data.content_type === "image" ? (
+                <img src={job.data.video_url} alt="" className="modal-image" />
+              ) : (
+                <audio src={job.data.video_url} controls className="modal-audio" />
+              )
             ) : job.data.status === "done" ? (
-              <p className="error">Failed: {job.data.error_message || "no video was produced."}</p>
+              <p className="error">Failed: {job.data.error_message || "no output was produced."}</p>
             ) : (
               <>
                 <p className="hint">
@@ -83,11 +100,14 @@ export function JobModal({ jobId, onClose, onRedo }: JobModalProps) {
                   {showAiPrompt && <dd>{job.data.improved_prompt}</dd>}
                 </>
               )}
-              <dt>Resolution &amp; length</dt>
-              <dd>
-                {job.data.width}×{job.data.height} ({job.data.aspect_ratio}, {job.data.megapixels}MP) —{" "}
-                {job.data.duration_seconds}s
-              </dd>
+              <dt>
+                {job.data.content_type === "video"
+                  ? "Resolution & length"
+                  : job.data.content_type === "image"
+                    ? "Resolution"
+                    : "Length"}
+              </dt>
+              <dd>{resolutionLabel(job.data)}</dd>
               <dt>Render time</dt>
               <dd>{renderTimeLabel(job.data)}</dd>
             </dl>
