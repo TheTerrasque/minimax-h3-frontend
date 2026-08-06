@@ -1,7 +1,10 @@
 # MinimaxH3 Front
 
 A friendly, invite-only web frontend for generating video with the MiniMax H3
-ComfyUI workflows (text-to-video, image-to-video, reference-to-video) — see
+ComfyUI workflows (text-to-video, image-to-video, reference-to-video), plus
+experimental image and audio generation (t2i/r2i/t2a/r2a — derived from the
+video workflows by extracting a frame or the audio track, see "Updating the
+ComfyUI workflows" below) — see
 [`resources/features.md`](resources/features.md) for the full product brief.
 
 Django (API backend) + React (SPA) + Django-Q2 (background job queue),
@@ -172,19 +175,81 @@ docker compose logs -f backend qcluster
 # Django shell (inspect/create objects directly)
 docker compose exec backend python manage.py shell
 
-# re-run after changing a workflow in resources/workflows/*.json in the
-# ComfyUI UI, to regenerate its API-format counterpart (paths are relative
-# to /app inside the container, where both scripts/ and resources/ live):
-docker compose exec backend python scripts/export_workflow_api.py \
-  resources/workflows/video_minimax_h3_t2v.json \
-  resources/workflows_api/video_minimax_h3_t2v.api.json
-
 # sweep (resolution, duration) combinations against the real ComfyUI to
 # find what's actually viable and how long it takes -- spends real GPU
 # time and can crash ComfyUI on oversized combinations by design (that's
 # the point); see ARCHITECTURE.md's "Benchmarking render times"
 docker compose exec backend python manage.py benchmark_render_times --help
 ```
+
+## Updating the ComfyUI workflows
+
+There are only **three** underlying ComfyUI graphs, all in
+[`resources/workflows/`](resources/workflows/):
+
+| File | Mode(s) it drives |
+|---|---|
+| `video_minimax_h3_t2v.json` | Text-to-video, **and** the experimental text-to-image / text-to-audio modes |
+| `video_minimax_h3_i2v.json` | Image-to-video |
+| `video_minimax_h3_r2v.json` | Reference-to-video, **and** the experimental reference-to-image / reference-to-audio modes |
+
+The image/audio modes don't have workflows of their own — they submit the
+*same* t2v/r2v graph, then [`integrations/media_post.py`](backend/integrations/media_post.py)
+uses ffmpeg to pull a still frame or the audio track out of the rendered
+video. So editing `video_minimax_h3_t2v.json` also changes what text-to-image
+and text-to-audio produce, and likewise for `video_minimax_h3_r2v.json` /
+reference-to-image / reference-to-audio.
+
+To change a workflow (swap a model, tweak default sampler settings, rewire
+nodes, etc.):
+
+1. Open the relevant `resources/workflows/*.json` file in ComfyUI's own UI
+   (drag it in, or File → Open) and make your changes there. Save it back
+   over the same file.
+2. Regenerate its API-format counterpart — what `POST /prompt` actually
+   consumes — by re-running the exporter **on your host machine** (not
+   `docker compose exec`: `resources/` isn't bind-mounted into the
+   containers, it's baked into the image at build time, so anything written
+   inside a running container is invisible to the host and gone the next
+   time that container is rebuilt/recreated). Needs the `backend/.venv` set
+   up (`uv sync`, from `backend/`) and a **reachable ComfyUI instance** (it
+   needs live `/object_info` for any node type not already cached under
+   `backend/scripts/object_info_cache/`):
+
+   ```sh
+   cd backend
+   # COMFYUI_BASE_URL defaults to http://comfyui:8188 if unset -- override it
+   # to wherever ComfyUI is reachable *from your host* (not
+   # host.docker.internal -- that name only resolves from inside a container)
+   COMFYUI_BASE_URL=http://localhost:8188 uv run python scripts/export_workflow_api.py \
+     ../resources/workflows/video_minimax_h3_t2v.json \
+     ../resources/workflows_api/video_minimax_h3_t2v.api.json
+   ```
+
+   Repeat for `_i2v_`/`_r2v_` as needed. This overwrites the matching file
+   in `resources/workflows_api/` on your host — that's the file actually
+   read at render time (`generation/tasks.py`). If a node's inputs changed
+   shape (new params, renamed sockets), delete the stale entry (or the whole
+   folder) under `backend/scripts/object_info_cache/` first so the exporter
+   re-fetches it.
+3. Rebuild and recreate the backend + qcluster containers so the updated
+   `.api.json` actually gets baked into their image (a plain `restart`
+   does **not** pick it up — same reason as step 2, nothing is bind-mounted):
+   `docker compose build backend qcluster && docker compose up -d`.
+
+**One caveat:** `generation/tasks.py` patches a handful of *specific node
+IDs* in each `.api.json` after loading it (prompt, resolution, steps,
+duration, seed, reference images/audio — see `_T2V_I2V_NODES`/`_R2V_NODES`
+near the top of that file). Tweaking existing nodes' settings/values is
+always safe — the exporter and `tasks.py` don't care what a node's
+*defaults* are, only where the ones it patches live. But if you delete,
+replace, or rewire one of those specific nodes (or otherwise change the
+graph structure around them), you'll need to update the matching node ID
+constants in `generation/tasks.py` to match, or job submission will patch
+the wrong node (or crash). See `ARCHITECTURE.md`'s "Getting the workflows
+working" section for the full technical rationale (including how the
+exporter itself works) and `resources/COMFYUI_API_GUIDE.md` for the ComfyUI
+API this all targets.
 
 ## Project structure
 

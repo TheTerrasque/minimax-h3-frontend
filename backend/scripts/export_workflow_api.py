@@ -13,7 +13,9 @@ Usage:
         "../resources/workflows/video_minimax_h3_t2v.json" \\
         "../resources/workflows_api/video_minimax_h3_t2v.api.json"
 
-COMFYUI_BASE_URL env var overrides the default http://gpusun:8188. Object
+COMFYUI_BASE_URL env var overrides the default http://comfyui:8188 -- point
+it at whatever ComfyUI instance is actually reachable from wherever this
+script runs. Object
 info responses are cached alongside this script (object_info_cache/) so
 re-running doesn't need the server up every time -- delete that folder to
 force a refresh if node schemas change.
@@ -67,7 +69,7 @@ import sys
 import urllib.request
 from pathlib import Path
 
-BASE_URL = os.environ.get("COMFYUI_BASE_URL", "http://gpusun:8188")
+BASE_URL = os.environ.get("COMFYUI_BASE_URL", "http://comfyui:8188")
 CACHE_DIR = Path(__file__).parent / "object_info_cache"
 
 PURE_REF_TYPES = {
