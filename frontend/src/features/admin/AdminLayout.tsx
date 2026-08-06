@@ -14,6 +14,9 @@ export function AdminLayout() {
         <NavLink to="catalog" className={({ isActive }) => `tab${isActive ? " selected" : ""}`}>
           Quality &amp; Duration
         </NavLink>
+        <a href="/admin/" target="_blank" rel="noopener noreferrer" className="admin-django-link">
+          Django Admin ↗
+        </a>
       </nav>
       <Outlet />
     </section>
