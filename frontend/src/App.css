@@ -197,6 +197,28 @@ select:focus-visible,
   box-shadow: var(--shadow);
 }
 
+.button-danger {
+  color: #dc2626;
+  border-color: rgba(220, 38, 38, 0.4);
+}
+
+.button-danger:hover {
+  background: rgba(220, 38, 38, 0.1);
+  border-color: #dc2626;
+}
+
+@media (prefers-color-scheme: dark) {
+  .button-danger {
+    color: #f87171;
+    border-color: rgba(248, 113, 113, 0.4);
+  }
+
+  .button-danger:hover {
+    background: rgba(248, 113, 113, 0.15);
+    border-color: #f87171;
+  }
+}
+
 fieldset {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -840,9 +862,15 @@ select {
 
 .modal-actions {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   margin-top: 16px;
   flex-wrap: wrap;
+}
+
+/* Destructive action set apart from the rest, not just color-coded --
+   pushed to the far end of the row so it's never adjacent to Download/Redo. */
+.modal-actions .button-danger {
+  margin-left: auto;
 }
 
 /* Admin / invites */

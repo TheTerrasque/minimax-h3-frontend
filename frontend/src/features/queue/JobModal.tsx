@@ -94,15 +94,16 @@ export function JobModal({ jobId, onClose, onRedo }: JobModalProps) {
 
             <div className="modal-actions">
               {job.data.video_url && (
-                <a href={job.data.video_url} download className="button">
-                  Download
+                <a href={job.data.video_url} download className="button button-primary">
+                  <span aria-hidden="true">⬇</span> Download
                 </a>
               )}
               <button type="button" onClick={() => onRedo(job.data)}>
-                Redo
+                <span aria-hidden="true">↻</span> Redo
               </button>
               <button
                 type="button"
+                className="button-danger"
                 onClick={handleDelete}
                 disabled={job.data.status === "processing" || deleteJob.isPending}
                 title={
@@ -111,7 +112,7 @@ export function JobModal({ jobId, onClose, onRedo }: JobModalProps) {
                     : undefined
                 }
               >
-                {deleteJob.isPending ? "Deleting…" : "Delete"}
+                <span aria-hidden="true">🗑</span> {deleteJob.isPending ? "Deleting…" : "Delete"}
               </button>
             </div>
             {deleteJob.isError && <p className="error">Couldn't delete that job. Try again.</p>}
