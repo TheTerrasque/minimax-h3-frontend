@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from django.db.models import Sum
 from django.utils import timezone
 
 from .models import GenerationJob
@@ -25,11 +24,23 @@ def estimated_seconds_ahead() -> int:
     """Sum of estimated_seconds for every job still queued or processing,
     system-wide. Adding a new job's own estimated_seconds to this gives the
     ETA to show before the user confirms queuing it.
+
+    The PROCESSING job (there's at most one, see tasks.py) has already burned
+    some of its own estimated_seconds since started_at -- counting its full
+    estimate here would overstate the backlog by however much of it has
+    already elapsed (e.g. a 14min job 12min in would still show a 14min
+    backlog instead of ~2min).
     """
-    total = GenerationJob.objects.filter(status__in=_ACTIVE_STATUSES).aggregate(
-        total=Sum("estimated_seconds")
-    )["total"]
-    return total or 0
+    total = 0
+    for job in GenerationJob.objects.filter(status__in=_ACTIVE_STATUSES).only(
+        "status", "started_at", "estimated_seconds"
+    ):
+        if job.status == GenerationJob.Status.PROCESSING and job.started_at:
+            elapsed = (timezone.now() - job.started_at).total_seconds()
+            total += max(0, job.estimated_seconds - elapsed)
+        else:
+            total += job.estimated_seconds
+    return round(total)
 
 
 def estimated_finish_time(additional_seconds: int):
