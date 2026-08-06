@@ -41,11 +41,47 @@ def reference_upload_path(instance, filename: str) -> str:
 
 
 class Mode(models.TextChoices):
-    """The three MiniMax H3 workflows in resources/workflows/."""
+    """The MiniMax H3 workflows. Three render video directly; the four
+    image/audio modes reuse those same video workflows (see
+    generation/tasks.py's _API_WORKFLOW_FILENAMES) at settings tuned for
+    each -- there's no native image- or audio-only ComfyUI graph for this
+    model, only video (which happens to carry a synced audio track). See
+    integrations/media_post.py for the ffmpeg post-processing that turns
+    that video output into a still frame or an audio-only file. Only
+    text/reference flows exist for image/audio (no image-to-X equivalent
+    of i2v)."""
 
     TEXT_TO_VIDEO = "t2v", "Video from text"
     IMAGE_TO_VIDEO = "i2v", "Provide first frame"
     REFERENCE_TO_VIDEO = "r2v", "Provide references"
+    TEXT_TO_IMAGE = "t2i", "Image from text"
+    REFERENCE_TO_IMAGE = "r2i", "Provide references"
+    TEXT_TO_AUDIO = "t2a", "Audio from text"
+    REFERENCE_TO_AUDIO = "r2a", "Provide references"
+
+
+class ContentType(models.TextChoices):
+    VIDEO = "video", "Video"
+    IMAGE = "image", "Image"
+    AUDIO = "audio", "Audio"
+
+
+# Which tab/output kind each mode belongs to -- see Mode's own docstring.
+CONTENT_TYPE_BY_MODE: dict[str, str] = {
+    Mode.TEXT_TO_VIDEO: ContentType.VIDEO,
+    Mode.IMAGE_TO_VIDEO: ContentType.VIDEO,
+    Mode.REFERENCE_TO_VIDEO: ContentType.VIDEO,
+    Mode.TEXT_TO_IMAGE: ContentType.IMAGE,
+    Mode.REFERENCE_TO_IMAGE: ContentType.IMAGE,
+    Mode.TEXT_TO_AUDIO: ContentType.AUDIO,
+    Mode.REFERENCE_TO_AUDIO: ContentType.AUDIO,
+}
+
+# Text-flow vs reference-flow -- the two axes each image/audio mode actually
+# needs (per Mode's docstring, there's no image-to-X equivalent for them).
+# Mirrors which underlying node map generation/tasks.py's
+# _build_workflow_for_job() patches (_T2V_I2V_NODES vs _R2V_NODES).
+REFERENCE_FLOW_MODES = {Mode.REFERENCE_TO_VIDEO, Mode.REFERENCE_TO_IMAGE, Mode.REFERENCE_TO_AUDIO}
 
 
 class RenderPreset(models.Model):
@@ -199,6 +235,14 @@ class GenerationJob(models.Model):
 
     # ComfyUI-side identifiers, see resources/COMFYUI_API_GUIDE.md.
     comfyui_prompt_id = models.CharField(max_length=64, blank=True, default="")
+    # Despite the name/field function, this holds the job's actual output
+    # regardless of mode -- a .mp4 for video modes, a .png for image modes,
+    # an .mp3 for audio modes (see integrations/media_post.py, called from
+    # tasks._finish_job_from_history()). Not renamed/split into separate
+    # fields for the newer content types -- one FileField genuinely doesn't
+    # care what bytes it holds, and every existing blank/non-blank check
+    # (success/failure, admin_api.py's estimator query, etc.) already means
+    # exactly "did this job produce output" regardless of what kind.
     video_file = models.FileField(upload_to=generated_video_upload_path, blank=True)
     error_message = models.TextField(blank=True, default="")
 
