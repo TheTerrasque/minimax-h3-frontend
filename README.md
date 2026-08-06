@@ -8,14 +8,28 @@ Django (API backend) + React (SPA) + Django-Q2 (background job queue),
 talking to an existing ComfyUI instance, all behind a single nginx entrypoint
 via Docker Compose.
 
-**Status:** the backend (accounts/invites, job model, ComfyUI wiring, and an
-optional LLM prompt-assist API — refine + chat, both working end to end) is
-built and dry-run verified. There is no frontend UI yet, and no way to
-actually create/list a `GenerationJob` over the API yet either — so the only
-ways to use this today are Django admin and the API directly. See
+**Status:** end-to-end working, including a real render. The backend
+(accounts/invites, the full `GenerationJob` create/list/detail/delete +
+presets + queue-estimate API, ComfyUI wiring including image *and* audio
+references, and an optional LLM prompt-assist API — refine + chat) and the
+React frontend (login screen, and a single persistent Generate + Queue
+layout — content-type/mode tabs, a compact resolution/length toolbar,
+reference thumbnails, an always-visible queue sidebar, and a per-job modal
+with download/delete/redo) are both built and verified in a real browser:
+log in → queue a job → watch it update live in the sidebar → open its
+modal. A real submission has also now actually reached ComfyUI and
+rendered a real video, start to finish (see
+[`FUNCTION_CHECK.md`](FUNCTION_CHECK.md) for the repeatable procedure this
+came out of, and `ARCHITECTURE.md`'s "Verification" section for details).
+What's still missing: a proper frontend for the not-yet-built parts (see
+`ARCHITECTURE.md`'s "Deferred"), and a real `benchmark_render_times`
+sweep — `RenderPreset.estimated_render_seconds` values are still mostly
+unbenchmarked guesses, just no longer *unverified guesses about whether
+rendering works at all*. See
 [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full design and exactly what's
-built vs. deferred, and [`todo.md`](todo.md) for a chronological log of this
-project's setup.
+built vs. deferred, [`FUNCTION_CHECK.md`](FUNCTION_CHECK.md) for how to
+re-verify any of this yourself, and [`todo.md`](todo.md) for a
+chronological log of this project's setup.
 
 ## Quick start
 
@@ -33,11 +47,12 @@ docker compose up -d --build
 
 That builds and starts everything (Postgres, migrations, Django, the
 Django-Q2 worker, and the nginx-fronted frontend) and serves the app at
-**http://localhost:8080/**. Since there's no frontend UI yet (see
-"Status" above), the API is what you'd actually poke at — browse
-**http://localhost:8080/api/schema/swagger-ui/** for interactive,
-auto-generated docs of every endpoint (log in via `/accounts/login/` first,
-in another tab, since the endpoints themselves require a session).
+**http://localhost:8080/** — the React SPA itself (log in, pick a mode,
+queue a video, watch it in the queue). For interactive, auto-generated docs
+of every endpoint instead, browse
+**http://localhost:8080/api/schema/swagger-ui/** (log in via
+`/accounts/login/` first, in another tab, since the endpoints themselves
+require a session).
 
 First-time setup, once the stack is up:
 
@@ -46,7 +61,12 @@ First-time setup, once the stack is up:
 docker compose exec backend python manage.py createsuperuser
 
 # then log into /admin/ with it to:
-#  - create RenderPreset rows (resolution/duration/steps combos to offer)
+#  - review/adjust RenderPreset rows (per-mode megapixels/steps quality
+#    tiers, e.g. Draft/Standard/High quality) and their RenderDuration rows
+#    (per-tier selectable clip lengths, each with its own estimated render
+#    time) -- a starter set per mode is already seeded by migration, with
+#    rough unbenchmarked estimated_render_seconds guesses; tune these once
+#    you've run manage.py benchmark_render_times for real
 #  - create an Invite (its shareable URL is /invite/<token>/) for anyone
 #    else who should get an account -- see "Accounts & invites" below
 ```
@@ -59,10 +79,13 @@ There is no open signup. Two ways to get an account:
   `OIDC_*` variables below, anyone who can successfully log in through that
   identity provider gets an account automatically (you already control who
   has credentials there).
-- **Everyone else needs an admin-issued invite** — create an `Invite` from
-  `/admin/`, then send the person its `/invite/<token>/` URL. Opening that
-  link and completing login is what actually creates their account; the
-  token is single-use.
+- **Everyone else needs an admin-issued invite** — create one from the
+  in-app admin page at `/manage` (visible in the nav to any staff user) or
+  from Django admin at `/admin/`, then send the person its
+  `/invite/<token>/` URL. Opening that link and completing login is what
+  actually creates their account; the token is single-use. `/manage` also
+  lists existing invites (active/redeemed/expired) with copy-link and
+  revoke actions.
 
 See `ARCHITECTURE.md`'s "Backend apps" section for the full rationale.
 
@@ -89,7 +112,7 @@ All configuration is environment variables, set in `.env` (copy
 | `DJANGO_SECRET_KEY` | *(insecure placeholder)* | Django's cryptographic signing key. Generate a real one: `python -c "import secrets; print(secrets.token_urlsafe(50))"`. Treat it as a secret. |
 | `DJANGO_DEBUG` | `false` | Verbose error pages when `true`. Keep `false` except while actively debugging — it leaks internals. |
 | `DJANGO_ALLOWED_HOSTS` | `localhost,127.0.0.1` | Comma-separated hostnames Django will accept requests for. Must include whatever host you actually browse to. |
-| `CSRF_TRUSTED_ORIGINS` | *(empty)* | Comma-separated full origins (scheme+host+port) allowed to make unsafe (POST/etc.) requests. Must include the origin you load the SPA from — e.g. `http://localhost:8080` for the default `frontend` port mapping. |
+| `CSRF_TRUSTED_ORIGINS` | *(empty)* | Comma-separated full origins (scheme+host+port) allowed to make unsafe (POST/etc.) requests. Must include **every** origin you actually load the SPA from — e.g. both `http://localhost:8080` and `http://127.0.0.1:8080` if you (or anyone else) might use either; Django checks the browser's `Origin` header against this list exactly, so one hostname doesn't cover another that resolves to the same machine. Missing one here 403s with "CSRF verification failed" on every POST, including login. |
 
 ### ComfyUI
 
@@ -102,15 +125,16 @@ See [`resources/COMFYUI_API_GUIDE.md`](resources/COMFYUI_API_GUIDE.md) for how t
 
 ### LLM prompt-assist (optional)
 
-Entirely optional — leave all three blank and no AI features (the "AI
-refine" button, the prompt chat) are offered at all; the app works fine
-without an LLM configured.
+Entirely optional — leave `LLM_API_BASE_URL`/`LLM_MODEL` blank and no AI
+features (the "AI refine" button, the prompt chat) are offered at all; the
+app works fine without an LLM configured.
 
 | Variable | Default | Description |
 |---|---|---|
-| `LLM_API_BASE_URL` | *(empty)* | Base URL of any OpenAI-compatible `/chat/completions` endpoint. |
-| `LLM_API_KEY` | *(empty)* | API key for that endpoint. |
-| `LLM_MODEL` | *(empty)* | Model name to request. |
+| `LLM_API_BASE_URL` | *(empty)* | Base URL of any OpenAI-compatible `/chat/completions` endpoint. Required (with `LLM_MODEL`) to enable AI features. |
+| `LLM_API_KEY` | *(empty)* | API key for that endpoint, if it needs one. **Optional** — many self-hosted servers (llama.cpp server, LM Studio, text-generation-webui, vLLM in permissive mode) don't require one; leave blank and no `Authorization` header is sent at all. |
+| `LLM_MODEL` | *(empty)* | Model name to request. Required (with `LLM_API_BASE_URL`) to enable AI features. |
+| `LLM_VISION_ENABLED` | `false` | When `true`, the chat feature sends actual reference image bytes to the LLM as vision content (not just their `<Picture N>` labels). Only turn this on if `LLM_MODEL` is genuinely vision-capable *and* the server actually has vision support loaded — a text/vision-capable model architecture running on a server without its vision-projector loaded will accept the request but the model won't actually see the images (confirmed hitting exactly this with a real test image against this project's own configured model — it works, but doesn't have vision loaded, so this stays `false` here). |
 
 ### OIDC login
 
@@ -127,7 +151,7 @@ Optional — leave `OIDC_CLIENT_ID` blank to run without OIDC configured yet (yo
 
 | Variable | Default | Description |
 |---|---|---|
-| `Q_CLUSTER_WORKERS` | `4` | Number of Django-Q2 worker processes handling generation jobs concurrently. ComfyUI itself only renders one job at a time regardless (it queues submissions on its own end), so this mostly affects how many jobs can be *submitted/polled* concurrently, not render throughput. |
+| `Q_CLUSTER_WORKERS` | `1` | Number of Django-Q2 worker processes. **Keep at 1** — jobs are processed strictly one at a time, FIFO (see `ARCHITECTURE.md`'s `tasks.py` bullet); raising this would let multiple jobs render in parallel, breaking that guarantee (and ComfyUI itself only renders one job at a time regardless, so there's no throughput to gain). |
 
 ## Useful commands
 
