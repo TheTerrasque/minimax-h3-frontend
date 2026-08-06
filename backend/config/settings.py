@@ -256,12 +256,27 @@ SPECTACULAR_SETTINGS = {
 # would let two *different* jobs run in parallel regardless of claim order,
 # which the DB-level row locking alone doesn't prevent. Don't raise this
 # without redesigning that.
+#
+# "timeout" is a hard wall-clock kill of the worker process, unrelated to
+# any timeout inside generation/tasks.py/integrations/comfyui.py (those
+# just make _execute_job() return -- they can't stop Django-Q2 from
+# reincarnating the worker mid-render if this is too low). It has to
+# comfortably exceed a single render's worst case, not just its estimate:
+# _execute_job() waits up to job.estimated_seconds * 3 + 300, and
+# estimated_seconds is seeded from rough, mostly-unbenchmarked guesses (see
+# generation/migrations/0009_seed_resolution_duration_catalog.py) that can
+# run long in practice -- a real ~20 minute render already tripped the old
+# 1200s default. Raise via env if your hardware/models are slower still.
+# "retry" must stay above "timeout" (Django-Q2 raises at startup otherwise)
+# with headroom for the ORM broker's own polling latency, so it's derived
+# rather than a second knob to keep in sync.
+_Q_CLUSTER_TIMEOUT = env.int("Q_CLUSTER_TIMEOUT", default=3600)
 Q_CLUSTER = {
     "name": "mm_h3",
     "orm": "default",
     "workers": env.int("Q_CLUSTER_WORKERS", default=1),
-    "timeout": 1200,
-    "retry": 1500,
+    "timeout": _Q_CLUSTER_TIMEOUT,
+    "retry": _Q_CLUSTER_TIMEOUT + 300,
     "queue_limit": 50,
     "bulk": 1,
     "catch_up": False,
