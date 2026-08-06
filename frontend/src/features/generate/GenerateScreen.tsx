@@ -323,6 +323,15 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
   // into the nearest fixed preset -- see computeImageAspectRatio.
   useEffect(() => {
     if (mode !== "i2v" || !firstFrame) {
+      // Leaving i2v (or clearing the first frame, including handleSubmit's
+      // post-queue reset) drops the matched option from the dropdown --
+      // if it was still the selected value, aspectRatio would otherwise be
+      // left pointing at a value with no matching <option>, which renders
+      // as whatever the first preset happens to be ("1:1") rather than
+      // actually reverting to the site default.
+      if (matchedAspectRatio && aspectRatio === matchedAspectRatio.value) {
+        setAspectRatio(config.data?.default_aspect_ratio ?? null);
+      }
       setMatchedAspectRatio(null);
       return;
     }
@@ -335,6 +344,10 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
     return () => {
       cancelled = true;
     };
+    // matchedAspectRatio/aspectRatio/config.data are read for their latest values (closure),
+    // deliberately not watched -- otherwise a manual aspectRatio pick while firstFrame is
+    // still set would get immediately clobbered back to the matched value.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, firstFrame]);
 
   const queueEstimate = useQueueEstimate(durationId);
