@@ -366,6 +366,7 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
       rawPrompt,
       referenceLabels,
       durationSeconds: selectedDuration?.duration_seconds,
+      referenceImages: config.data?.llm_vision_enabled ? referenceImages : undefined,
     });
     setImprovedPrompt(result.improved_prompt);
   }

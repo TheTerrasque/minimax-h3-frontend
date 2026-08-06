@@ -106,6 +106,13 @@ class RefinePromptRequestSerializer(serializers.Serializer):
         help_text="The currently-selected clip length, if any -- so the LLM keeps shot-cut "
         "timestamps within the actual video duration instead of guessing.",
     )
+    reference_images = serializers.ListField(
+        child=serializers.FileField(),
+        required=False,
+        help_text="Currently-staged reference images (e.g. i2v's first/last frame). Only "
+        "actually sent to the LLM (as vision content) when settings.LLM_VISION_ENABLED; "
+        "otherwise ignored.",
+    )
 
 
 class RefinePromptResponseSerializer(serializers.Serializer):
@@ -345,12 +352,27 @@ def refine_prompt(request):
     raw_prompt = request.data.get("raw_prompt", "")
     if not raw_prompt.strip():
         return Response({"error": "raw_prompt is required."}, status=400)
-    reference_labels = request.data.get("reference_labels") or None
-    duration_seconds = request.data.get("duration_seconds")
+    reference_labels = request.data.getlist("reference_labels") or None
+    duration_seconds_raw = request.data.get("duration_seconds")
+    try:
+        duration_seconds = float(duration_seconds_raw) if duration_seconds_raw else None
+    except (TypeError, ValueError):
+        duration_seconds = None
+
+    reference_images = None
+    if settings.LLM_VISION_ENABLED:
+        reference_images = [
+            (f.read(), f.content_type or "application/octet-stream")
+            for f in request.FILES.getlist("reference_images")
+        ] or None
 
     try:
         improved_prompt = llm.improve_prompt(
-            mode, raw_prompt, reference_labels, duration_seconds=duration_seconds
+            mode,
+            raw_prompt,
+            reference_labels,
+            duration_seconds=duration_seconds,
+            reference_images=reference_images,
         )
     except llm.LLMError as exc:
         return Response({"error": str(exc)}, status=502)

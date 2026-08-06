@@ -106,10 +106,23 @@ def improve_prompt(
     raw_prompt: str,
     reference_labels: list[str] | None = None,
     duration_seconds: float | None = None,
+    reference_images: list[tuple[bytes, str]] | None = None,
 ) -> str:
     """One-shot rewrite of raw_prompt into MiniMax H3's expected prompt
-    structure -- backs the "AI refine" button."""
+    structure -- backs the "AI refine" button.
+
+    reference_images: (bytes, content_type) pairs for the currently-staged
+    reference images (e.g. i2v's first/last frame) -- attached to the user
+    message as vision content parts, same as chat_reply(), but only when
+    settings.LLM_VISION_ENABLED; a no-op plain-text request otherwise.
+    """
     guide = _load_guide(mode)
+    user_content: str | list[dict] = f"{_reference_note(reference_labels)}\n\nUser's raw prompt:\n{raw_prompt}"
+    if settings.LLM_VISION_ENABLED and reference_images:
+        user_content = [
+            {"type": "text", "text": user_content},
+            *(_image_content_part(data, content_type) for data, content_type in reference_images),
+        ]
     messages = [
         {
             "role": "system",
@@ -119,10 +132,7 @@ def improve_prompt(
                 f"{_duration_note(duration_seconds)}\n\n{guide}"
             ),
         },
-        {
-            "role": "user",
-            "content": f"{_reference_note(reference_labels)}\n\nUser's raw prompt:\n{raw_prompt}",
-        },
+        {"role": "user", "content": user_content},
     ]
     return _post_chat_completion(messages)
 

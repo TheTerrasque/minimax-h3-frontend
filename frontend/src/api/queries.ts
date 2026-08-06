@@ -126,16 +126,20 @@ export function useRefinePrompt() {
       /** The currently-selected clip length, if any -- so the LLM keeps
        * shot-cut timestamps within the actual video duration. */
       durationSeconds?: number;
-    }) =>
-      apiFetch<{ improved_prompt: string }>("/prompt/refine/", {
-        method: "POST",
-        body: JSON.stringify({
-          mode: input.mode,
-          raw_prompt: input.rawPrompt,
-          reference_labels: input.referenceLabels,
-          duration_seconds: input.durationSeconds,
-        }),
-      }),
+      /** Currently-staged reference images (e.g. i2v's first/last frame).
+       * Only actually used by the LLM when the backend has
+       * LLM_VISION_ENABLED -- harmless (ignored) otherwise, but only worth
+       * the upload when config.data.llm_vision_enabled is true. */
+      referenceImages?: File[];
+    }) => {
+      const form = new FormData();
+      form.set("mode", input.mode);
+      form.set("raw_prompt", input.rawPrompt);
+      if (input.durationSeconds != null) form.set("duration_seconds", String(input.durationSeconds));
+      for (const label of input.referenceLabels ?? []) form.append("reference_labels", label);
+      for (const file of input.referenceImages ?? []) form.append("reference_images", file);
+      return apiFetch<{ improved_prompt: string }>("/prompt/refine/", { method: "POST", body: form });
+    },
   });
 }
 
