@@ -86,7 +86,27 @@ def _post_chat_completion(messages: list[dict[str, str]]) -> str:
     return resp.json()["choices"][0]["message"]["content"].strip()
 
 
-def improve_prompt(mode: str, raw_prompt: str, reference_labels: list[str] | None = None) -> str:
+def _duration_note(duration_seconds: float | None) -> str:
+    # The house guide requires shot-cut timestamps (and the last-frame
+    # alignment instruction's S.SS mark) to fall within the actual video
+    # duration -- without this, the LLM has no way to know that duration and
+    # would have to guess, easily producing cut times past the real clip
+    # length.
+    if not duration_seconds:
+        return ""
+    return (
+        f"\n\nTarget video duration: {duration_seconds:.2f} seconds. Every shot cut timestamp, "
+        "and the last-frame alignment instruction's S.SS mark if this task uses one, must fall "
+        "within this duration."
+    )
+
+
+def improve_prompt(
+    mode: str,
+    raw_prompt: str,
+    reference_labels: list[str] | None = None,
+    duration_seconds: float | None = None,
+) -> str:
     """One-shot rewrite of raw_prompt into MiniMax H3's expected prompt
     structure -- backs the "AI refine" button."""
     guide = _load_guide(mode)
@@ -95,7 +115,8 @@ def improve_prompt(mode: str, raw_prompt: str, reference_labels: list[str] | Non
             "role": "system",
             "content": (
                 "You rewrite user video prompts to follow the house prompt-writing guide "
-                "below exactly. Output only the rewritten prompt, nothing else.\n\n" + guide
+                "below exactly. Output only the rewritten prompt, nothing else."
+                f"{_duration_note(duration_seconds)}\n\n{guide}"
             ),
         },
         {
@@ -113,6 +134,7 @@ def chat_reply(
     raw_prompt: str = "",
     reference_images: list[tuple[bytes, str]] | None = None,
     improved_prompt: str = "",
+    duration_seconds: float | None = None,
 ) -> str:
     """Multi-turn conversational prompt crafting -- backs the interactive
     chat feature. Entirely stateless: nothing here reads or writes
@@ -134,6 +156,9 @@ def chat_reply(
     given as separate, clearly-labeled context so the assistant knows what
     the user is actually looking at right now and can revise *that* instead
     of drifting back to raw_prompt or re-deriving from scratch.
+
+    duration_seconds: the currently-selected clip length, if any -- see
+    _duration_note(); needed so shot-cut timestamps stay within the video.
 
     reference_images: (bytes, content_type) pairs for the currently-staged
     reference images, resent with every call (the caller already has them
@@ -175,7 +200,8 @@ def chat_reply(
             "user as a one-click action, so it must contain the prompt text alone (no labels, "
             "no commentary) whenever you use it. The rest of your reply (questions, suggestions, "
             "explanations) goes outside that block, as normal.\n\n"
-            f"{_reference_note(reference_labels)}{draft_note}{improved_note}\n\n{guide}"
+            f"{_reference_note(reference_labels)}{draft_note}{improved_note}"
+            f"{_duration_note(duration_seconds)}\n\n{guide}"
         ),
     }
     messages = [system_message, *history]

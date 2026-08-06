@@ -361,7 +361,12 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
 
   async function handleRefine() {
     if (!rawPrompt.trim()) return;
-    const result = await refinePrompt.mutateAsync({ mode, rawPrompt, referenceLabels });
+    const result = await refinePrompt.mutateAsync({
+      mode,
+      rawPrompt,
+      referenceLabels,
+      durationSeconds: selectedDuration?.duration_seconds,
+    });
     setImprovedPrompt(result.improved_prompt);
   }
 
@@ -382,6 +387,7 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
         content,
         rawPrompt,
         improvedPrompt,
+        durationSeconds: selectedDuration?.duration_seconds,
         referenceLabels,
         referenceImages: config.data?.llm_vision_enabled ? referenceImages : undefined,
       });

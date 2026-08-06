@@ -119,13 +119,21 @@ export function useDeleteJob() {
 
 export function useRefinePrompt() {
   return useMutation({
-    mutationFn: (input: { mode: Mode; rawPrompt: string; referenceLabels?: string[] }) =>
+    mutationFn: (input: {
+      mode: Mode;
+      rawPrompt: string;
+      referenceLabels?: string[];
+      /** The currently-selected clip length, if any -- so the LLM keeps
+       * shot-cut timestamps within the actual video duration. */
+      durationSeconds?: number;
+    }) =>
       apiFetch<{ improved_prompt: string }>("/prompt/refine/", {
         method: "POST",
         body: JSON.stringify({
           mode: input.mode,
           raw_prompt: input.rawPrompt,
           reference_labels: input.referenceLabels,
+          duration_seconds: input.durationSeconds,
         }),
       }),
   });
@@ -143,6 +151,9 @@ export interface ChatReplyInput {
   /** The currently-active AI-refined prompt, if any -- given to the LLM as
    * separate, clearly-labeled context distinct from rawPrompt. */
   improvedPrompt?: string;
+  /** The currently-selected clip length, if any -- so the LLM keeps
+   * shot-cut timestamps within the actual video duration. */
+  durationSeconds?: number;
   referenceLabels?: string[];
   /** Currently-staged reference images. Only actually used by the LLM when
    * the backend has LLM_VISION_ENABLED -- harmless (ignored) otherwise, but
@@ -159,6 +170,7 @@ export function useChatReply() {
       form.set("content", input.content);
       if (input.rawPrompt) form.set("raw_prompt", input.rawPrompt);
       if (input.improvedPrompt) form.set("improved_prompt", input.improvedPrompt);
+      if (input.durationSeconds != null) form.set("duration_seconds", String(input.durationSeconds));
       for (const label of input.referenceLabels ?? []) form.append("reference_labels", label);
       for (const file of input.referenceImages ?? []) form.append("reference_images", file);
       return apiFetch<ChatMessage>("/prompt/chat/", { method: "POST", body: form });
