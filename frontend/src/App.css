@@ -876,6 +876,11 @@ select {
   color: #1a8a4a;
 }
 
+.job-status-cancelled {
+  color: var(--text);
+  opacity: 0.7;
+}
+
 /* Applied alongside .job-status-done when a "done" job actually failed
    (no video_url) -- see features/queue/QueueSidebar.tsx's didJobFail(). */
 .job-status-failed {

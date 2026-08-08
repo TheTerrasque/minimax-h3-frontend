@@ -165,17 +165,20 @@ class RenderDuration(models.Model):
 
 class GenerationJob(models.Model):
     class Status(models.TextChoices):
-        """Deliberately just three states for now (see tasks.py's
-        process_queue()): jobs are processed strictly one at a time, FIFO,
-        so there's no need to distinguish "running" from "about to run" the
-        way a parallel-worker model would. DONE covers both success and
-        failure -- check error_message/video_file to tell them apart (a
-        real terminal FAILED state can come back later if that distinction
-        needs to be first-class again)."""
+        """Jobs are processed strictly one at a time, FIFO (see tasks.py's
+        process_queue()), so there's no need to distinguish "running" from
+        "about to run" the way a parallel-worker model would. DONE covers
+        both success and failure -- check error_message/video_file to tell
+        them apart (a real terminal FAILED state can come back later if
+        that distinction needs to be first-class again). CANCELLED is its
+        own terminal state (not folded into DONE+error_message like a real
+        failure) purely so the frontend can show "Cancelled" instead of
+        "Failed" -- see generation/api.py's cancel_job()."""
 
         QUEUED = "queued", "Queued"
         PROCESSING = "processing", "Processing"
         DONE = "done", "Done"
+        CANCELLED = "cancelled", "Cancelled"
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="generation_jobs"
@@ -246,6 +249,16 @@ class GenerationJob(models.Model):
     )
     progress_total = models.PositiveIntegerField(
         null=True, blank=True, help_text="Total sampler steps for this job -- only set during Phase.RENDERING."
+    )
+
+    cancel_requested = models.BooleanField(
+        default=False,
+        help_text="Set by generation/api.py's cancel_job() on a PROCESSING job (the request that "
+        "hits mid-render, as opposed to a still-QUEUED job, which is cancelled directly and "
+        "synchronously instead). The actively-running tasks._execute_job() call for this job -- "
+        "not the cancel request itself, to avoid a cross-process race overwriting whichever one "
+        "saves status last -- polls this flag and, once ComfyUI's round trip ends one way or "
+        "another, is what actually writes Status.CANCELLED.",
     )
 
     # Unused since the switch to tasks.process_queue(): one shared Django-Q2

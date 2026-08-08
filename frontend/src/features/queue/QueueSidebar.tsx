@@ -11,6 +11,7 @@ const STATUS_LABELS: Record<JobStatus, string> = {
   queued: "Queued",
   processing: "Processing…",
   done: "Done",
+  cancelled: "Cancelled",
 };
 
 function formatDuration(seconds: number): string {
@@ -132,7 +133,11 @@ export function QueueSidebar({ onOpenJob }: QueueSidebarProps) {
     const previouslyActive = previouslyActiveRef.current;
     if (notifyOnDone && typeof Notification !== "undefined" && Notification.permission === "granted") {
       for (const job of current) {
-        if (previouslyActive.has(job.id) && !ACTIVE_STATUSES.has(job.status)) {
+        // Cancellation is always something the user themselves just did in
+        // this same browser (see JobModal's Cancel button) -- a
+        // notification for it would just be a redundant echo, unlike a
+        // done/failed transition which can happen while they're away.
+        if (previouslyActive.has(job.id) && !ACTIVE_STATUSES.has(job.status) && job.status !== "cancelled") {
           const failed = didJobFail(job);
           new Notification(failed ? "Generation failed" : "Generation done", {
             body: titleFor(job),

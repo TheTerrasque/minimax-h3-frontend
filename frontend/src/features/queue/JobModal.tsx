@@ -1,5 +1,5 @@
 import { useEffect, useState, type KeyboardEvent } from "react";
-import { useDeleteJob, useJob, useUpdateJobTitle } from "../../api/queries";
+import { useCancelJob, useDeleteJob, useJob, useUpdateJobTitle } from "../../api/queries";
 import { MODE_LABELS, type GenerationJobDetail } from "../../api/types";
 import { displayTitle } from "./jobTitle";
 import { JobProgressBar } from "./JobProgressBar";
@@ -41,6 +41,7 @@ interface JobModalProps {
 export function JobModal({ jobId, onClose, onRedo }: JobModalProps) {
   const job = useJob(jobId);
   const deleteJob = useDeleteJob();
+  const cancelJob = useCancelJob();
   const updateTitle = useUpdateJobTitle();
   const [showAiPrompt, setShowAiPrompt] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -58,6 +59,10 @@ export function JobModal({ jobId, onClose, onRedo }: JobModalProps) {
   async function handleDelete() {
     await deleteJob.mutateAsync(jobId);
     onClose();
+  }
+
+  async function handleCancel() {
+    await cancelJob.mutateAsync(jobId);
   }
 
   function startEditingTitle() {
@@ -121,6 +126,8 @@ export function JobModal({ jobId, onClose, onRedo }: JobModalProps) {
               )
             ) : job.data.status === "done" ? (
               <p className="error">Failed: {job.data.error_message || "no output was produced."}</p>
+            ) : job.data.status === "cancelled" ? (
+              <p className="hint">Cancelled.</p>
             ) : (
               <>
                 <p className="hint">
@@ -171,6 +178,17 @@ export function JobModal({ jobId, onClose, onRedo }: JobModalProps) {
               <button type="button" onClick={() => onRedo(job.data)}>
                 <span aria-hidden="true">↻</span> Redo
               </button>
+              {(job.data.status === "queued" || job.data.status === "processing") && (
+                <button
+                  type="button"
+                  className="button-danger"
+                  onClick={handleCancel}
+                  disabled={cancelJob.isPending}
+                >
+                  <span aria-hidden="true">⏹</span>{" "}
+                  {cancelJob.isPending ? "Cancelling…" : "Cancel job"}
+                </button>
+              )}
               {confirmingDelete ? (
                 <>
                   <span className="hint">Delete this job? This can't be undone.</span>
@@ -203,6 +221,7 @@ export function JobModal({ jobId, onClose, onRedo }: JobModalProps) {
               )}
             </div>
             {deleteJob.isError && <p className="error">Couldn't delete that job. Try again.</p>}
+            {cancelJob.isError && <p className="error">Couldn't cancel that job. Try again.</p>}
           </>
         )}
       </div>

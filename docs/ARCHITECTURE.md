@@ -368,15 +368,30 @@ ones I invite"):
   reachable by joining through `preset`/`duration`) so later admin edits to
   the catalog can't retroactively change a number already shown to a user,
   and so `tasks.py` has everything it needs without extra joins. `status` is
-  deliberately just `queued`/`processing`/`done` — jobs render strictly one
-  at a time, FIFO (see `tasks.py` below), and `done` covers both success and
+  `queued`/`processing`/`done`/`cancelled` — jobs render strictly one at a
+  time, FIFO (see `tasks.py` below), and `done` covers both success and
   failure (told apart by `video_file`/`error_message`, not a separate
-  terminal status — a real `failed`/`cancelled` split can come back if that
-  distinction needs to be first-class again; cancellation was never wired
-  up regardless). The finer-grained "what's actually happening right now"
-  detail this deliberately leaves out lives in the separate `phase`/
+  terminal status — a real `failed` split can come back if that distinction
+  needs to be first-class again). `cancelled` *is* its own terminal status
+  (unlike a real failure) purely so the frontend can show "Cancelled"
+  distinctly — see `POST /api/jobs/{id}/cancel/` below and `cancel_requested`
+  just below. The finer-grained "what's actually happening right now" detail
+  this deliberately leaves out of `status` lives in the separate `phase`/
   `progress_current`/`progress_total` fields instead (see `api.py` below),
   not by adding more `status` values.
+  `cancel_requested` is a separate boolean, not folded into `status`,
+  because cancelling a `processing` job is inherently cross-process: the
+  cancel request lands in the `backend` container, but the job's row is
+  actively owned by `_execute_job()` running in `qcluster` — if the cancel
+  request wrote `status=cancelled` directly, `_execute_job()`'s own
+  eventual `job.save()` would silently stomp it back to `done` once
+  ComfyUI's round trip ends. Setting the flag instead and having
+  `_execute_job()` itself poll it (via `comfyui.wait_for_result()`'s/
+  `stream_execution_progress()`'s `cancel_check` callbacks) means there's
+  still only one writer of the terminal `status`. A still-`queued` job skips
+  all of this — `cancel_job()` flips it straight to `cancelled` under the
+  same `select_for_update()` locking `_claim_next_job()` uses, since it
+  never reached ComfyUI in the first place.
 - `ReferenceAsset` — image/video/audio attachments on a job, with a computed
   `label` (`"Picture 1"`, `"Video 1"`, `"Audio 1"`) matching the
   `<Picture N>`/`<Video N>`/`<Audio N>` convention in
@@ -492,7 +507,16 @@ ones I invite"):
   URL also takes `DELETE`
   (409 while `processing` — `_execute_job()` is actively mutating that row —
   otherwise removes the job's reference/video files from disk and the row
-  itself, `204` on success). Every view carries an `@extend_schema`
+  itself, `204` on success). `POST /api/jobs/{id}/cancel/` handles the
+  `processing` case `DELETE` refuses: a `queued` job is cancelled directly
+  (409 if it's already terminal); a `processing` job instead sets
+  `cancel_requested` and best-effort tells ComfyUI to stop
+  (`comfyui.cancel_prompt()` — dequeue *and* interrupt, since which one
+  applies depends on whether ComfyUI has actually started executing it
+  yet), then returns immediately with the job still showing `processing`;
+  it's `_execute_job()`'s own wait loop, over in `qcluster`, that actually
+  writes `cancelled` once ComfyUI's round trip ends — see `GenerationJob`
+  above for why. Every view carries an `@extend_schema`
   (drf-spectacular, per-method via `methods=[...]` on `job_detail` since one
   `@api_view` handles both `GET` and `DELETE`) describing its request/response
   shape for the auto-generated API docs — see "API documentation" below.
@@ -504,13 +528,23 @@ ones I invite"):
 
 - `comfyui.py` — real implementation of upload / queue / poll / download /
   extract-output / delete-output / clear-history / error-status-detection /
-  reachability-check, following `resources/COMFYUI_API_GUIDE.md` §5–§10.
-  Doesn't know about any specific workflow's node ids — callers own the
-  API-format JSON. `check_for_error()` and `is_alive()` exist specifically
+  reachability-check / cancel, following `resources/COMFYUI_API_GUIDE.md`
+  §5–§10. Doesn't know about any specific workflow's node ids — callers own
+  the API-format JSON. `check_for_error()` and `is_alive()` exist specifically
   so a prompt that ComfyUI accepted but then failed server-side (e.g. an
   OOM it caught itself) surfaces as a clear error instead of a confusing
   `KeyError` reaching into an unpopulated `outputs` dict, and so the
   benchmark command can tell a slow-but-alive server apart from a crashed one.
+  `cancel_prompt()` (backing `POST /api/jobs/{id}/cancel/`, see "Backend
+  apps" above) POSTs both `/queue` (`{"delete": [prompt_id]}`, dequeues it if
+  it hasn't started executing) and `/interrupt` (stops whatever's currently
+  executing, taking no `prompt_id` itself — safe to call unconditionally
+  since `Q_CLUSTER_WORKERS=1` guarantees at most one prompt is ever in
+  flight). `wait_for_result()`/`stream_execution_progress()` both take an
+  optional `cancel_check` callback, polled once per loop iteration, so a
+  cancellation is noticed promptly rather than only once ComfyUI's own
+  `/history` (which may never come, if the prompt was dequeued before it
+  ever ran) or full multi-minute timeout resolves it.
 - `llm.py` — OpenAI-compatible chat-completion client; loads the right guide
   from `resources/prompt instructions/` per mode as system context: the base
   guide for t2v/i2v, the reference guide for r2v, and simpler
@@ -686,11 +720,14 @@ with no `duration_id`). Each entry: a title (the job's `raw_prompt`,
 truncated to ~40 chars — this is why `raw_prompt` moved to the base job
 serializer, see "Backend apps" above), a status badge (`didJobFail()` still
 distinguishes a `done`-but-no-`video_url` job as "Failed" for display
-purposes only, same as before — the backend's real `status` stays just
-`queued`/`processing`/`done`), a relative timestamp, and — once `done` with
-a `video_url` — a small muted `<video preload="metadata">` as a thumbnail
-(the browser's natural first-frame render; no backend thumbnail-generation
-work was needed). Clicking an entry opens `JobModal` for that job's id.
+purposes only — the backend's real `status` values are `queued`/
+`processing`/`done`/`cancelled`, see "Backend apps" above), the job's
+quality-tier label (`preset_label`, right-aligned on that same row) so the
+list shows what quality each job rendered at without opening it, a relative
+timestamp, and — once `done` with a `video_url` — a poster-image thumbnail
+(`thumbnail_url`, falling back to a bare `<video preload="metadata">` for
+jobs rendered before that field existed). Clicking an entry opens `JobModal`
+for that job's id.
 
 **`features/queue/JobModal.tsx`** (new) — fetches full detail via the
 existing `useJob(jobId)` hook and shows: the prompt (raw, and the
@@ -702,7 +739,10 @@ despite being on the job already) and length, render time (actual
 **Download** link (`<a href={video_url} download>` — the video URL is
 already same-origin thanks to the `/media/` fix above, so this just works),
 a **Redo** button (hands the fetched job up to `MainLayout` as
-`redoPayload`), and a **Delete** button (`DELETE /api/jobs/{id}/`, disabled
+`redoPayload`), a **Cancel job** button (`POST /api/jobs/{id}/cancel/`,
+shown only while `status` is `queued` or `processing` — see "Backend apps"
+above for how a `processing` cancel actually resolves asynchronously
+server-side), and a **Delete** button (`DELETE /api/jobs/{id}/`, disabled
 with an explanatory `title` while `status === "processing"` — mirroring the
 backend's 409 rather than just discovering it from a failed request).
 Known gap carried over from before: the list-level `didJobFail()` label is
@@ -1389,15 +1429,6 @@ Intentionally not built in this pass:
   the frontend already presents this as two distinct slots ("First frame" /
   "Last frame"), worth an explicit field if that convention ever needs to
   change.
-- **No job cancellation while processing** — `DELETE /api/jobs/{id}/`
-  (added this pass, see "Backend apps" above) covers removing a `queued` or
-  finished `done` job, but explicitly refuses (409) while `processing` —
-  there's still no way to interrupt an in-flight ComfyUI render, and no
-  `cancelled` status value (dropped along with `failed` when `Status`
-  shrank to `queued`/`processing`/`done` in an earlier pass — see
-  "generation" above); would need reintroducing a distinct terminal state
-  if in-flight cancellation gets built, since `done` currently
-  short-circuits nothing.
 - **No frontend/API typegen** — `src/api/types.ts` is hand-maintained to
   match `generation/api.py`/`accounts/api.py`'s response shapes rather than
   generated from `/api/schema/`; fine at this size, worth automating if the

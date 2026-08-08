@@ -126,6 +126,18 @@ export function useDeleteJob() {
   });
 }
 
+export function useCancelJob() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (jobId: number) =>
+      apiFetch<GenerationJobDetail>(`/jobs/${jobId}/cancel/`, { method: "POST" }),
+    onSuccess: (_data, jobId) => {
+      void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      void queryClient.invalidateQueries({ queryKey: ["job", jobId] });
+    },
+  });
+}
+
 export function useUpdateJobTitle() {
   const queryClient = useQueryClient();
   return useMutation({

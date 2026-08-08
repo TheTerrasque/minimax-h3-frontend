@@ -416,6 +416,34 @@ def _mark_job_failed(job: GenerationJob, error_message: str) -> None:
     )
 
 
+def _mark_job_cancelled(job: GenerationJob) -> None:
+    job.status = GenerationJob.Status.CANCELLED
+    job.error_message = "Cancelled by user."
+    job.finished_at = timezone.now()
+    job.phase = ""
+    job.progress_current = None
+    job.progress_total = None
+    job.save(
+        update_fields=[
+            "status",
+            "error_message",
+            "finished_at",
+            "phase",
+            "progress_current",
+            "progress_total",
+        ]
+    )
+
+
+def _cancel_requested(job_id: int) -> bool:
+    """Polled from inside _execute_job()'s ComfyUI wait -- generation/api.py's
+    cancel_job() sets GenerationJob.cancel_requested from a different process
+    (the `backend` container, not `qcluster`), so this has to be a fresh DB
+    read each time, not anything cached on the in-memory `job` instance
+    _execute_job() has been carrying since _claim_next_job()."""
+    return GenerationJob.objects.filter(pk=job_id, cancel_requested=True).exists()
+
+
 def _execute_job(job: GenerationJob) -> None:
     """Runs one already-PROCESSING job's ComfyUI round trip to completion.
 
@@ -440,20 +468,35 @@ def _execute_job(job: GenerationJob) -> None:
         job.save(update_fields=["comfyui_prompt_id"])
 
         timeout = job.estimated_seconds * 3 + 300
+        cancel_check = lambda: _cancel_requested(job.id)  # noqa: E731
         # Best-effort live phase/progress (see comfyui.stream_execution_progress's
         # own docstring) -- swallows its own errors and simply returns early if
         # anything goes wrong, so a WebSocket hiccup never fails the job itself;
         # the actual result always still comes from wait_for_result()+
         # check_for_error() below, exactly as before this was added.
         comfyui.stream_execution_progress(
-            prompt_id, client_id, _PROGRESS_SAMPLER_NODES[job.mode], _progress_callback(job.id), timeout=timeout
+            prompt_id,
+            client_id,
+            _PROGRESS_SAMPLER_NODES[job.mode],
+            _progress_callback(job.id),
+            timeout=timeout,
+            cancel_check=cancel_check,
         )
 
-        history_record = comfyui.wait_for_result(prompt_id, timeout=timeout)
+        history_record = comfyui.wait_for_result(prompt_id, timeout=timeout, cancel_check=cancel_check)
         _finish_job_from_history(job, history_record)
 
     except Exception as exc:  # noqa: BLE001 -- surfaced to the user via job.error_message
-        _mark_job_failed(job, str(exc))
+        # A real ComfyUI error and a cancel_job() request both land here
+        # (the latter either as comfyui.ComfyUICancelled from our own
+        # cancel_check poll, or as a plain ComfyUIExecutionError if ComfyUI's
+        # own /history happened to report the interrupt first) -- checking
+        # the flag rather than the exception type is what actually
+        # distinguishes "cancelled" from "genuinely failed" for the user.
+        if _cancel_requested(job.id):
+            _mark_job_cancelled(job)
+        else:
+            _mark_job_failed(job, str(exc))
 
     # job.status is always DONE by this point either way (see this
     # function's own docstring) -- error_message set/blank distinguishes
@@ -505,6 +548,19 @@ def recover_orphaned_processing_jobs() -> None:
 
 
 def _recover_one_orphaned_job(job: GenerationJob) -> None:
+    if job.cancel_requested:
+        # A cancel_job() request landed but the process (backend or
+        # qcluster) restarted before _execute_job()'s own wait loop noticed
+        # it -- the user doesn't want whatever ComfyUI has for this prompt
+        # at this point, so finalize as cancelled rather than trying to
+        # recover a result nobody's waiting for. Best-effort re-send the
+        # stop in case the original cancel_job() call never reached ComfyUI
+        # before the restart.
+        if job.comfyui_prompt_id:
+            comfyui.cancel_prompt(job.comfyui_prompt_id)
+        _mark_job_cancelled(job)
+        return
+
     if not job.comfyui_prompt_id:
         # Never even got as far as submitting to ComfyUI before the restart.
         _mark_job_failed(job, "Interrupted before reaching ComfyUI (server restarted mid-job).")

@@ -31,7 +31,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
-from integrations import llm
+from integrations import comfyui, llm
 
 from .models import (
     CONTENT_TYPE_BY_MODE,
@@ -894,3 +894,60 @@ def job_detail(request, job_id: int):
 
     finish_time = expected_finish_times().get(job.id)
     return Response(_serialize_job(job, detail=True, expected_finish_time=finish_time))
+
+
+@extend_schema(
+    summary="Cancel a queued or processing generation job",
+    description=(
+        "A still-QUEUED job is cancelled directly and synchronously here (it never reached "
+        "ComfyUI, so there's nothing else to stop). A PROCESSING job is handled differently: "
+        "this only flags GenerationJob.cancel_requested and best-effort tells ComfyUI to stop "
+        "(dequeue + interrupt, see integrations/comfyui.py's cancel_prompt()) -- the job stays "
+        "PROCESSING in the response and only actually flips to CANCELLED once "
+        "generation.tasks._execute_job()'s own wait loop (running in the qcluster process, the "
+        "one actually holding that row) notices the flag, to avoid a cross-process race where "
+        "this request and that loop's own final job.save() could stomp on each other. Only the "
+        "owning user can cancel their own job (404 otherwise)."
+    ),
+    responses={
+        200: GenerationJobDetailSerializer,
+        404: OpenApiResponse(description="Not found."),
+        409: OpenApiResponse(
+            ErrorResponseSerializer, description="Job is already done/cancelled -- nothing to cancel."
+        ),
+    },
+    tags=["generation"],
+)
+@api_view(["POST"])
+def cancel_job(request, job_id: int):
+    with transaction.atomic():
+        job = get_object_or_404(
+            GenerationJob.objects.select_related("preset", "duration").select_for_update(),
+            id=job_id,
+            user=request.user,
+        )
+
+        if job.status == GenerationJob.Status.QUEUED:
+            job.status = GenerationJob.Status.CANCELLED
+            job.error_message = "Cancelled by user."
+            job.finished_at = timezone.now()
+            job.save(update_fields=["status", "error_message", "finished_at"])
+            return Response(_serialize_job(job, detail=True))
+
+        if job.status != GenerationJob.Status.PROCESSING:
+            return Response(
+                {"error": "This job isn't queued or processing anymore, so there's nothing to cancel."},
+                status=409,
+            )
+
+        job.cancel_requested = True
+        job.save(update_fields=["cancel_requested"])
+
+    # Outside the transaction/row lock above -- this is a network round trip
+    # to ComfyUI, not something that should hold the lock open. Best-effort:
+    # _execute_job()'s own cancel_requested poll (see tasks.py) is what
+    # actually finalizes the job's status either way.
+    if job.comfyui_prompt_id:
+        comfyui.cancel_prompt(job.comfyui_prompt_id)
+
+    return Response(_serialize_job(job, detail=True))

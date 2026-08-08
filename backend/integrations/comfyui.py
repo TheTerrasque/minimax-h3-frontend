@@ -9,6 +9,7 @@ API-format workflow JSON and patch it before calling queue_prompt().
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -17,6 +18,8 @@ from typing import Any, Callable
 import requests
 import websocket
 from django.conf import settings
+
+logger = logging.getLogger(__name__)
 
 
 class ComfyUIError(RuntimeError):
@@ -27,6 +30,16 @@ class ComfyUIExecutionError(ComfyUIError):
     """Raised when a queued prompt reached /history but finished with an
     error status (e.g. a CUDA OOM caught server-side) rather than crashing
     the connection outright. See check_for_error()."""
+
+
+class ComfyUICancelled(ComfyUIError):
+    """Raised by wait_for_result() when its cancel_check callback reports
+    the job was cancelled while waiting. Needed as a distinct signal rather
+    than just letting a cancelled prompt fall out of /history normally --
+    if cancel_prompt() dequeued it before it ever started executing, ComfyUI
+    never writes a /history entry for it at all, so without this
+    wait_for_result() would otherwise block until its full multi-minute
+    timeout instead of returning as soon as the cancellation is noticed."""
 
 
 @dataclass
@@ -73,11 +86,22 @@ def queue_prompt(api_workflow: dict[str, Any], client_id: str) -> str:
 
 
 def wait_for_result(
-    prompt_id: str, poll_seconds: float = 3.0, timeout: float = 900.0
+    prompt_id: str,
+    poll_seconds: float = 3.0,
+    timeout: float = 900.0,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
-    """Polls GET /history/{prompt_id} until it's populated (or times out)."""
+    """Polls GET /history/{prompt_id} until it's populated (or times out).
+
+    cancel_check, if given, is polled once per loop iteration (same cadence
+    as the /history check) -- lets a caller (generation.tasks._execute_job)
+    notice a cancel_job() request without ComfyUI's own /history ever having
+    to report it, see ComfyUICancelled's docstring for why that matters.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        if cancel_check is not None and cancel_check():
+            raise ComfyUICancelled(f"ComfyUI prompt {prompt_id} was cancelled while waiting.")
         resp = requests.get(f"{_base_url()}/history/{prompt_id}", timeout=15)
         resp.raise_for_status()
         history = resp.json()
@@ -93,6 +117,7 @@ def stream_execution_progress(
     sampler_node_id: str,
     on_update: Callable[[str, int | None, int | None], None],
     timeout: float = 900.0,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> None:
     """Connects to ComfyUI's `/ws?clientId=...` and calls
     on_update(phase, current, max) as prompt_id's execution moves through
@@ -114,11 +139,18 @@ def stream_execution_progress(
     Callers must always separately call wait_for_result() + check_for_error()
     regardless of how this returns; this function returns (without raising)
     as soon as the prompt reports fully done (`executing` with node=None),
-    reports an execution_error (letting the caller's own /history check
-    produce the real error, so there's only one place that formats it), or
-    on any connection problem/timeout -- swallowing its own exceptions
-    rather than propagating them, since losing live progress is fine but
-    failing the whole job over a WebSocket hiccup would not be.
+    reports an execution_error or execution_interrupted (letting the
+    caller's own /history check produce the real error/cancellation
+    handling, so there's only one place that formats it), or on any
+    connection problem/timeout -- swallowing its own exceptions rather than
+    propagating them, since losing live progress is fine but failing the
+    whole job over a WebSocket hiccup would not be.
+
+    cancel_check, if given, is polled roughly once a second (same as the
+    receive-timeout cadence below) -- lets this return promptly on a
+    cancel_job() request instead of sitting in recv() for up to `timeout`
+    waiting on a prompt that may never send another message (e.g. it was
+    dequeued before ComfyUI ever started executing it).
     """
     ws = None
     try:
@@ -127,7 +159,9 @@ def stream_execution_progress(
         seen_sampler = False
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            ws.settimeout(max(1.0, deadline - time.monotonic()))
+            if cancel_check is not None and cancel_check():
+                return
+            ws.settimeout(min(1.0, max(0.1, deadline - time.monotonic())))
             try:
                 raw = ws.recv()
             except websocket.WebSocketTimeoutException:
@@ -156,7 +190,7 @@ def stream_execution_progress(
                     on_update("finishing" if seen_sampler else "preparing", None, None)
             elif msg_type == "progress" and data.get("node") == sampler_node_id:
                 on_update("rendering", data.get("value"), data.get("max"))
-            elif msg_type == "execution_error":
+            elif msg_type in ("execution_error", "execution_interrupted"):
                 return
     except Exception:
         return
@@ -280,3 +314,29 @@ def delete_output_file(output: ComfyUIOutput) -> None:
 
 def clear_history(prompt_id: str) -> None:
     requests.post(f"{_base_url()}/history", json={"delete": [prompt_id]}, timeout=15)
+
+
+def cancel_prompt(prompt_id: str) -> None:
+    """Best-effort stop of a prompt on ComfyUI's side -- used by
+    generation/api.py's cancel_job(). Tries both ways a prompt can need
+    stopping: POST /queue {"delete": [prompt_id]} dequeues it if it hasn't
+    started executing yet, POST /interrupt stops whatever ComfyUI is
+    *currently* executing. Calling /interrupt unconditionally (it takes no
+    prompt_id) is safe here specifically because Q_CLUSTER_WORKERS=1 means
+    at most one prompt is ever in flight system-wide -- there's no risk of
+    it interrupting some other job.
+
+    Swallows its own errors -- this runs from an interactive cancel
+    request, and generation.tasks._execute_job()'s own wait loop (polling
+    GenerationJob.cancel_requested, see ComfyUICancelled) is what actually
+    resolves the job's status either way, whether or not this call
+    succeeds in reaching ComfyUI at all.
+    """
+    try:
+        requests.post(f"{_base_url()}/queue", json={"delete": [prompt_id]}, timeout=15)
+    except requests.exceptions.RequestException:
+        logger.warning("Failed to dequeue ComfyUI prompt %s while cancelling", prompt_id, exc_info=True)
+    try:
+        requests.post(f"{_base_url()}/interrupt", timeout=15)
+    except requests.exceptions.RequestException:
+        logger.warning("Failed to interrupt ComfyUI while cancelling prompt %s", prompt_id, exc_info=True)

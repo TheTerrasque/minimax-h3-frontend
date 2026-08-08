@@ -123,11 +123,12 @@ export interface ReferenceAsset {
   url: string | null;
 }
 
-// Deliberately just three states -- jobs render strictly one at a time,
-// FIFO (see backend/generation/tasks.py's process_queue()), so there's no
-// "about to run" vs "running" distinction to make. "done" covers both
-// success and failure -- check video_url/error_message to tell them apart.
-export type JobStatus = "queued" | "processing" | "done";
+// Jobs render strictly one at a time, FIFO (see backend/generation/tasks.py's
+// process_queue()), so there's no "about to run" vs "running" distinction to
+// make. "done" covers both success and failure -- check video_url/
+// error_message to tell them apart. "cancelled" is its own terminal state
+// (see useCancelJob) so the UI can show "Cancelled" instead of "Failed".
+export type JobStatus = "queued" | "processing" | "done" | "cancelled";
 
 // Sub-state of a "processing" job, per ComfyUI's own three real execution
 // phases -- see backend/integrations/comfyui.py's stream_execution_progress().
