@@ -236,6 +236,12 @@ docker compose exec backend python manage.py benchmark_render_times --help
 # check whether COMFYUI_EXTRAS' ComfyUI-side custom nodes are actually
 # installed on the configured ComfyUI instance -- see docs/extras.md
 docker compose exec backend python manage.py check_extras
+
+# generate thumbnails for existing done video jobs that don't have one yet
+# (new jobs get one automatically) -- idempotent, safe to re-run. The
+# migrate service tries this automatically already; run it manually here
+# if that didn't work (e.g. migrate has no media volume access in your setup)
+docker compose exec backend python manage.py backfill_thumbnails
 ```
 
 ## Required ComfyUI models

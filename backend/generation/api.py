@@ -253,6 +253,11 @@ class GenerationJobSerializer(serializers.Serializer):
         help_text="Included at list level (not just detail) so the frontend can show a "
         "title without a second request per job."
     )
+    title = serializers.CharField(
+        allow_blank=True,
+        help_text="User-editable label (see PATCH below) -- blank means the frontend should "
+        "fall back to raw_prompt, see frontend/src/features/queue/jobTitle.ts.",
+    )
     preset_id = serializers.IntegerField()
     duration_id = serializers.IntegerField()
     megapixels = serializers.FloatField()
@@ -266,6 +271,13 @@ class GenerationJobSerializer(serializers.Serializer):
         "estimated_seconds above does NOT account for it."
     )
     video_url = serializers.CharField(allow_null=True)
+    thumbnail_url = serializers.CharField(
+        allow_null=True,
+        help_text="Small poster image for video-content-type jobs (see media_post.extract_thumbnail) "
+        "-- null for image/audio jobs (video_url itself already works as a thumbnail for those) "
+        "and for jobs rendered before this field existed. Prefer this over video_url for list-view "
+        "thumbnails -- it's a static image, not a <video> element per row.",
+    )
     created_at = serializers.DateTimeField()
     started_at = serializers.DateTimeField(allow_null=True)
     finished_at = serializers.DateTimeField(allow_null=True)
@@ -292,6 +304,13 @@ class GenerationJobDetailSerializer(GenerationJobSerializer):
     improved_prompt = serializers.CharField()
     error_message = serializers.CharField()
     references = ReferenceAssetSerializer(many=True)
+
+
+class UpdateJobTitleRequestSerializer(serializers.Serializer):
+    title = serializers.CharField(
+        allow_blank=True, max_length=200,
+        help_text="Blank clears it (the frontend then falls back to showing raw_prompt).",
+    )
 
 
 @extend_schema(
@@ -564,6 +583,7 @@ def _serialize_job(
         "content_type": CONTENT_TYPE_BY_MODE[job.mode],
         "status": job.status,
         "raw_prompt": job.raw_prompt,
+        "title": job.title,
         "preset_id": job.preset_id,
         "duration_id": job.duration_id,
         "megapixels": job.megapixels,
@@ -574,6 +594,7 @@ def _serialize_job(
         "estimated_seconds": job.estimated_seconds,
         "use_spectrum": job.use_spectrum,
         "video_url": job.video_file.url if job.video_file else None,
+        "thumbnail_url": job.thumbnail_file.url if job.thumbnail_file else None,
         "created_at": job.created_at,
         "started_at": job.started_at,
         "finished_at": job.finished_at,
@@ -815,10 +836,10 @@ def jobs(request):
 @extend_schema(
     methods=["DELETE"],
     summary="Delete a generation job",
-    description="Removes the job (and its reference/video files) permanently. Only the owning "
-    "user can delete their own job (404 otherwise). Refused while the job is actively "
-    "processing (409) -- generation.tasks._execute_job() is mutating that row and expects it "
-    "to still exist; delete it once it's done, or once it's back to queued.",
+    description="Removes the job (and its reference/video/thumbnail files) permanently. Only "
+    "the owning user can delete their own job (404 otherwise). Refused while the job is "
+    "actively processing (409) -- generation.tasks._execute_job() is mutating that row and "
+    "expects it to still exist; delete it once it's done, or once it's back to queued.",
     responses={
         204: OpenApiResponse(description="Deleted."),
         404: OpenApiResponse(description="Not found."),
@@ -826,7 +847,16 @@ def jobs(request):
     },
     tags=["generation"],
 )
-@api_view(["GET", "DELETE"])
+@extend_schema(
+    methods=["PATCH"],
+    summary="Rename a generation job",
+    description="Only touches title -- every other field is set at creation time and never "
+    "editable. Only the owning user can rename their own job (404 otherwise).",
+    request=UpdateJobTitleRequestSerializer,
+    responses={200: GenerationJobDetailSerializer, 400: ErrorResponseSerializer, 404: OpenApiResponse(description="Not found.")},
+    tags=["generation"],
+)
+@api_view(["GET", "DELETE", "PATCH"])
 def job_detail(request, job_id: int):
     job = get_object_or_404(
         GenerationJob.objects.select_related("preset", "duration").prefetch_related("references"),
@@ -841,8 +871,20 @@ def job_detail(request, job_id: int):
             ref.file.delete(save=False)
         if job.video_file:
             job.video_file.delete(save=False)
+        if job.thumbnail_file:
+            job.thumbnail_file.delete(save=False)
         job.delete()
         return Response(status=204)
+
+    if request.method == "PATCH":
+        title = request.data.get("title")
+        if not isinstance(title, str):
+            return Response({"error": "title is required and must be a string."}, status=400)
+        if len(title) > 200:
+            return Response({"error": "title must be at most 200 characters."}, status=400)
+        job.title = title.strip()
+        job.save(update_fields=["title"])
+        return Response(_serialize_job(job, detail=True))
 
     finish_time = expected_finish_times().get(job.id)
     return Response(_serialize_job(job, detail=True, expected_finish_time=finish_time))

@@ -41,6 +41,7 @@ same patching without any GenerationJob/RenderPreset DB rows to back it.
 from __future__ import annotations
 
 import json
+import logging
 import random
 import uuid
 from pathlib import Path
@@ -54,6 +55,8 @@ from django.utils import timezone
 from integrations import comfyui, hooks, media_post, spectrum
 
 from .models import CONTENT_TYPE_BY_MODE, REFERENCE_FLOW_MODES, ContentType, GenerationJob, Mode, ReferenceAsset
+
+logger = logging.getLogger(__name__)
 
 SAVE_VIDEO_NODE_ID = "92"
 
@@ -367,21 +370,26 @@ def _finish_job_from_history(job: GenerationJob, history_record: dict[str, Any])
     filename, output_bytes = _postprocess_output(job, output, video_bytes)
 
     job.video_file.save(filename, ContentFile(output_bytes), save=False)
+
+    update_fields = ["video_file", "status", "finished_at", "phase", "progress_current", "progress_total"]
+    if CONTENT_TYPE_BY_MODE[job.mode] == ContentType.VIDEO:
+        # Best-effort: a poster image is a nice-to-have for the queue list
+        # (see QueueSidebar's QueueThumb), not the actual output -- video_file
+        # above already succeeded by this point and shouldn't be held
+        # hostage by a thumbnail-generation hiccup.
+        try:
+            thumbnail_bytes = media_post.extract_thumbnail(video_bytes)
+            job.thumbnail_file.save(f"{Path(filename).stem}.png", ContentFile(thumbnail_bytes), save=False)
+            update_fields.append("thumbnail_file")
+        except Exception:
+            logger.exception("Thumbnail generation failed for job %s -- continuing without one", job.id)
+
     job.status = GenerationJob.Status.DONE
     job.finished_at = timezone.now()
     job.phase = ""
     job.progress_current = None
     job.progress_total = None
-    job.save(
-        update_fields=[
-            "video_file",
-            "status",
-            "finished_at",
-            "phase",
-            "progress_current",
-            "progress_total",
-        ]
-    )
+    job.save(update_fields=update_fields)
 
     # Don't leave a copy on the ComfyUI machine now that we have it, and
     # tidy the history entry -- see resources/COMFYUI_API_GUIDE.md #10.

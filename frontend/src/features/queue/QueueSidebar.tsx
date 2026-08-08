@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useJobs, useQueueEstimate } from "../../api/queries";
 import { MODE_LABELS, type GenerationJob, type JobStatus } from "../../api/types";
+import { displayTitle } from "./jobTitle";
 import { JobProgressBar } from "./JobProgressBar";
 
 const NOTIFY_STORAGE_KEY = "notifyOnJobDone";
@@ -26,9 +27,8 @@ function didJobFail(job: GenerationJob): boolean {
 }
 
 function titleFor(job: GenerationJob): string {
-  const trimmed = job.raw_prompt.trim();
-  if (!trimmed) return MODE_LABELS[job.mode];
-  return trimmed.length > 40 ? `${trimmed.slice(0, 40)}…` : trimmed;
+  const title = displayTitle(job);
+  return title.length > 40 ? `${title.slice(0, 40)}…` : title;
 }
 
 function relativeTime(iso: string): string {
@@ -42,7 +42,14 @@ function relativeTime(iso: string): string {
 
 function QueueThumb({ job }: { job: GenerationJob }) {
   if (job.status === "done" && job.video_url) {
-    if (job.content_type === "video") return <video src={job.video_url} muted preload="metadata" />;
+    if (job.content_type === "video") {
+      // Prefer the pre-generated poster image (a static <img>, cheap to
+      // render N-per-list) -- fall back to the old <video> thumb only for
+      // jobs rendered before thumbnail_url existed (or the rare
+      // thumbnail-generation failure), never worse than before.
+      if (job.thumbnail_url) return <img src={job.thumbnail_url} alt="" />;
+      return <video src={job.video_url} muted preload="metadata" />;
+    }
     if (job.content_type === "image") return <img src={job.video_url} alt="" />;
     // Audio has no useful tiny-thumbnail rendering (an <audio> element is a
     // full player, not an image) -- falls through to the placeholder below.

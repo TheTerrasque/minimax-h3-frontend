@@ -31,6 +31,10 @@ class Invite(models.Model):
     # Optional: lock the invite to one email address. Left blank, anyone who
     # completes OIDC login while holding the token gets an account.
     email = models.EmailField(blank=True, default="")
+    # Optional, admin-facing only -- never shown to the invitee, purely so
+    # whoever created it can remember who it was for ("for Alex, GPU
+    # testing"). Not validated/used for anything beyond display.
+    note = models.CharField(max_length=200, blank=True, default="")
 
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,

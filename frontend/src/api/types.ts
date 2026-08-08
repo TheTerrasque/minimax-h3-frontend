@@ -75,6 +75,7 @@ export interface Invite {
   id: number;
   token: string; // combine with location.origin to build /invite/<token>/
   email: string; // blank if not locked to one address
+  note: string; // optional admin-facing note (e.g. who it's for), never shown to the invitee
   created_by: string | null; // username
   created_at: string;
   expires_at: string | null;
@@ -139,6 +140,9 @@ export interface GenerationJob {
   content_type: ContentType;
   status: JobStatus;
   raw_prompt: string;
+  // User-editable label (see useUpdateJobTitle) -- blank means the frontend
+  // should fall back to raw_prompt, see features/queue/jobTitle.ts.
+  title: string;
   preset_id: number;
   duration_id: number;
   megapixels: number;
@@ -151,6 +155,11 @@ export interface GenerationJob {
   // estimated_seconds above does NOT account for it.
   use_spectrum: boolean;
   video_url: string | null;
+  // Small poster image for video-content-type jobs -- null for image/audio
+  // jobs (video_url already works as a thumbnail for those) and for jobs
+  // rendered before this field existed. Prefer this over video_url for
+  // list-view thumbnails.
+  thumbnail_url: string | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;

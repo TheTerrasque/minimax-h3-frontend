@@ -126,6 +126,21 @@ export function useDeleteJob() {
   });
 }
 
+export function useUpdateJobTitle() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ jobId, title }: { jobId: number; title: string }) =>
+      apiFetch<GenerationJobDetail>(`/jobs/${jobId}/`, {
+        method: "PATCH",
+        body: JSON.stringify({ title }),
+      }),
+    onSuccess: (_data, { jobId }) => {
+      void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      void queryClient.invalidateQueries({ queryKey: ["job", jobId] });
+    },
+  });
+}
+
 export function useRefinePrompt() {
   return useMutation({
     mutationFn: (input: {
@@ -198,10 +213,14 @@ export function useInvites() {
 export function useCreateInvite() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (input: { email?: string; expiresInDays?: number }) =>
+    mutationFn: (input: { email?: string; note?: string; expiresInDays?: number }) =>
       apiFetch<Invite>("/invites/", {
         method: "POST",
-        body: JSON.stringify({ email: input.email, expires_in_days: input.expiresInDays }),
+        body: JSON.stringify({
+          email: input.email,
+          note: input.note,
+          expires_in_days: input.expiresInDays,
+        }),
       }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["invites"] });

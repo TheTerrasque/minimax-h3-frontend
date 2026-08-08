@@ -55,3 +55,15 @@ def extract_first_frame(video_bytes: bytes) -> bytes:
 def extract_audio(video_bytes: bytes) -> bytes:
     """Extracts the audio track as an MP3 -- backs Mode.TEXT_TO_AUDIO/REFERENCE_TO_AUDIO."""
     return _run_ffmpeg(["-vn", "-acodec", "libmp3lame", "-q:a", "2"], video_bytes, ".mp3")
+
+
+def extract_thumbnail(video_bytes: bytes, max_width: int = 320) -> bytes:
+    """Extracts frame 0, downscaled to max_width wide, as a PNG -- backs
+    GenerationJob.thumbnail_file (see generation/tasks.py's
+    _finish_job_from_history). Deliberately separate from
+    extract_first_frame(): that one backs actual image-mode *output* and
+    must stay full-resolution; this one is only ever a small queue-list
+    poster image."""
+    return _run_ffmpeg(
+        ["-frames:v", "1", "-update", "1", "-vf", f"scale={max_width}:-1"], video_bytes, ".png"
+    )

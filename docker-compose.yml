@@ -18,6 +18,13 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     env_file: .env
+    # Needed by data migrations that touch existing media files (e.g.
+    # generation/migrations/0021_backfill_video_thumbnails.py) -- without
+    # this, migrate's /app/media is just an empty directory baked into the
+    # image, not the real data backend/qcluster read/write, so any such
+    # migration fails to find files that genuinely exist.
+    volumes:
+      - media_data:/app/media
     command: ["python", "manage.py", "migrate", "--noinput"]
     depends_on:
       db:

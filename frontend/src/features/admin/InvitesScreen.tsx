@@ -18,6 +18,7 @@ export function InvitesScreen() {
   const deleteInvite = useDeleteInvite();
 
   const [email, setEmail] = useState("");
+  const [note, setNote] = useState("");
   const [expiresInDays, setExpiresInDays] = useState("");
   const [copiedId, setCopiedId] = useState<number | null>(null);
 
@@ -25,9 +26,11 @@ export function InvitesScreen() {
     e.preventDefault();
     await createInvite.mutateAsync({
       email: email.trim() || undefined,
+      note: note.trim() || undefined,
       expiresInDays: expiresInDays ? Number(expiresInDays) : undefined,
     });
     setEmail("");
+    setNote("");
     setExpiresInDays("");
   }
 
@@ -52,6 +55,16 @@ export function InvitesScreen() {
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             placeholder="Anyone with the link, or lock to one address"
+          />
+        </label>
+        <label className="toolbar-control">
+          <span>Note (optional)</span>
+          <input
+            type="text"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="e.g. for Alex, GPU testing"
+            maxLength={200}
           />
         </label>
         <label className="toolbar-control">
@@ -87,6 +100,7 @@ export function InvitesScreen() {
                   {invite.created_by && ` by ${invite.created_by}`}
                   {invite.expires_at && ` · expires ${new Date(invite.expires_at).toLocaleDateString()}`}
                   {invite.redeemed_by && ` · redeemed by ${invite.redeemed_by}`}
+                  {invite.note && ` · note: ${invite.note}`}
                 </span>
               </div>
               <div className="invite-row-actions">
@@ -97,8 +111,13 @@ export function InvitesScreen() {
                   type="button"
                   onClick={() => deleteInvite.mutate(invite.id)}
                   disabled={deleteInvite.isPending}
+                  title={
+                    invite.is_redeemed
+                      ? "Deleting an already-redeemed invite only removes this record -- it doesn't affect the account it created."
+                      : undefined
+                  }
                 >
-                  Revoke
+                  {invite.is_redeemed ? "Remove" : "Revoke"}
                 </button>
               </div>
             </li>

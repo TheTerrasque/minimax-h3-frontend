@@ -1,4 +1,5 @@
-"""Auth+ownership-gated serving of GenerationJob.video_file/ReferenceAsset.file.
+"""Auth+ownership-gated serving of GenerationJob.video_file/thumbnail_file
+and ReferenceAsset.file.
 
 Everything under MEDIA_ROOT used to be served by a bare, unconditional
 django.views.static.serve mount (see config/urls.py's history) -- that has
@@ -30,6 +31,8 @@ from .models import GenerationJob, ReferenceAsset
 def _owner_id_for_path(path: str) -> int | None:
     if path.startswith("generated_videos/"):
         return GenerationJob.objects.filter(video_file=path).values_list("user_id", flat=True).first()
+    if path.startswith("thumbnails/"):
+        return GenerationJob.objects.filter(thumbnail_file=path).values_list("user_id", flat=True).first()
     if path.startswith("references/"):
         return ReferenceAsset.objects.filter(file=path).values_list("job__user_id", flat=True).first()
     return None

@@ -62,6 +62,8 @@ class InviteSerializer(serializers.Serializer):
     token = serializers.CharField(help_text="Combine with the frontend origin to build "
         "/invite/<token>/, the shareable URL.")
     email = serializers.CharField(help_text="Blank if not locked to one address.")
+    note = serializers.CharField(help_text="Optional admin-facing note (e.g. who it's for) -- "
+        "never shown to the invitee.")
     created_by = serializers.CharField(allow_null=True, help_text="Username, or null.")
     created_at = serializers.DateTimeField()
     expires_at = serializers.DateTimeField(allow_null=True)
@@ -77,6 +79,11 @@ class CreateInviteRequestSerializer(serializers.Serializer):
         help_text="Optional -- locks the invite to this address (see Invite.is_valid_for_email). "
         "Blank means anyone holding the link can redeem it.",
     )
+    note = serializers.CharField(
+        required=False, allow_blank=True, max_length=200,
+        help_text="Optional -- admin-facing only, e.g. who this invite is for. Never shown to "
+        "the invitee, not used for anything beyond display in the admin invite list.",
+    )
     expires_in_days = serializers.IntegerField(
         required=False, allow_null=True,
         help_text="Optional -- computed into expires_at server-side (avoids client/server clock "
@@ -89,6 +96,7 @@ def _serialize_invite(invite: Invite) -> dict:
         "id": invite.id,
         "token": invite.token,
         "email": invite.email,
+        "note": invite.note,
         "created_by": invite.created_by.username if invite.created_by_id else None,
         "created_at": invite.created_at,
         "expires_at": invite.expires_at,
@@ -125,6 +133,7 @@ def invites(request):
         return Response([_serialize_invite(i) for i in Invite.objects.all()])
 
     email = request.data.get("email", "") or ""
+    note = request.data.get("note", "") or ""
     expires_in_days = request.data.get("expires_in_days")
     expires_at = None
     if expires_in_days not in (None, ""):
@@ -133,7 +142,7 @@ def invites(request):
         except (TypeError, ValueError):
             return Response({"error": "expires_in_days must be an integer."}, status=400)
 
-    invite = Invite.objects.create(email=email, expires_at=expires_at, created_by=request.user)
+    invite = Invite.objects.create(email=email, note=note, expires_at=expires_at, created_by=request.user)
     return Response(_serialize_invite(invite), status=201)
 
 

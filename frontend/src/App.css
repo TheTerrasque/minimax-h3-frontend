@@ -763,7 +763,8 @@ select {
   justify-content: center;
 }
 
-.queue-entry-thumb video {
+.queue-entry-thumb video,
+.queue-entry-thumb img {
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -906,6 +907,35 @@ select {
   cursor: pointer;
   color: var(--text);
   padding: 4px 8px;
+}
+
+.modal-title-editable {
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 2px 4px;
+  margin: -2px -4px;
+}
+
+.modal-title-editable:hover {
+  background: var(--code-bg);
+}
+
+.modal-title-input {
+  font: inherit;
+  font-weight: 700;
+  font-size: 1.5em;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text-h);
+}
+
+.modal-mode-label {
+  margin: 2px 0 0;
 }
 
 .modal-video {

@@ -36,6 +36,10 @@ def generated_video_upload_path(instance, filename: str) -> str:
     return _random_upload_path("generated_videos", filename)
 
 
+def generated_thumbnail_upload_path(instance, filename: str) -> str:
+    return _random_upload_path("thumbnails", filename)
+
+
 def reference_upload_path(instance, filename: str) -> str:
     return _random_upload_path("references", filename)
 
@@ -182,6 +186,14 @@ class GenerationJob(models.Model):
 
     raw_prompt = models.TextField()
     improved_prompt = models.TextField(blank=True, default="")
+    title = models.CharField(
+        max_length=200,
+        blank=True,
+        default="",
+        help_text="User-editable label for this job in the queue/history (see "
+        "generation/api.py's PATCH job_detail). Blank means the frontend falls back to "
+        "showing (a truncated) raw_prompt instead -- see frontend/src/features/queue/jobTitle.ts.",
+    )
 
     # Snapshotted at creation from preset/duration/aspect_ratio (see
     # generation/api.py::jobs() and resolution.compute_resolution()) so
@@ -252,6 +264,13 @@ class GenerationJob(models.Model):
     # (success/failure, admin_api.py's estimator query, etc.) already means
     # exactly "did this job produce output" regardless of what kind.
     video_file = models.FileField(upload_to=generated_video_upload_path, blank=True)
+    # Small poster image for video-content-type jobs only (see
+    # tasks._finish_job_from_history), so the queue list can show a static
+    # <img> instead of loading a <video> element per row -- see
+    # media_post.extract_thumbnail(). Blank for image/audio-content-type
+    # jobs (video_file/video_url itself already renders fine as a thumbnail
+    # for those) and for jobs rendered before this field existed.
+    thumbnail_file = models.FileField(upload_to=generated_thumbnail_upload_path, blank=True)
     error_message = models.TextField(blank=True, default="")
 
     created_at = models.DateTimeField(auto_now_add=True)

@@ -1,6 +1,7 @@
-import { useState } from "react";
-import { useDeleteJob, useJob } from "../../api/queries";
+import { useEffect, useState, type KeyboardEvent } from "react";
+import { useDeleteJob, useJob, useUpdateJobTitle } from "../../api/queries";
 import { MODE_LABELS, type GenerationJobDetail } from "../../api/types";
+import { displayTitle } from "./jobTitle";
 import { JobProgressBar } from "./JobProgressBar";
 
 function formatDuration(seconds: number): string {
@@ -40,11 +41,40 @@ interface JobModalProps {
 export function JobModal({ jobId, onClose, onRedo }: JobModalProps) {
   const job = useJob(jobId);
   const deleteJob = useDeleteJob();
+  const updateTitle = useUpdateJobTitle();
   const [showAiPrompt, setShowAiPrompt] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+
+  // Reset per-job UI state in case this modal instance is reused for a
+  // different job rather than remounted (e.g. clicking straight from one
+  // job to another without closing in between).
+  useEffect(() => {
+    setConfirmingDelete(false);
+    setEditingTitle(false);
+  }, [jobId]);
 
   async function handleDelete() {
     await deleteJob.mutateAsync(jobId);
     onClose();
+  }
+
+  function startEditingTitle() {
+    if (!job.data) return;
+    setTitleDraft(displayTitle(job.data));
+    setEditingTitle(true);
+  }
+
+  async function saveTitle() {
+    setEditingTitle(false);
+    if (!job.data || titleDraft.trim() === job.data.title.trim()) return;
+    await updateTitle.mutateAsync({ jobId, title: titleDraft.trim() });
+  }
+
+  function handleTitleKeyDown(e: KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Enter") e.currentTarget.blur(); // triggers onBlur -> saveTitle
+    if (e.key === "Escape") setEditingTitle(false);
   }
 
   return (
@@ -59,7 +89,27 @@ export function JobModal({ jobId, onClose, onRedo }: JobModalProps) {
 
         {job.data && (
           <>
-            <h2>{MODE_LABELS[job.data.mode]}</h2>
+            {editingTitle ? (
+              <input
+                type="text"
+                className="modal-title-input"
+                autoFocus
+                value={titleDraft}
+                maxLength={200}
+                onChange={(e) => setTitleDraft(e.target.value)}
+                onBlur={saveTitle}
+                onKeyDown={handleTitleKeyDown}
+              />
+            ) : (
+              <h2
+                className="modal-title-editable"
+                onClick={startEditingTitle}
+                title="Click to rename"
+              >
+                {displayTitle(job.data)}
+              </h2>
+            )}
+            <p className="hint modal-mode-label">{MODE_LABELS[job.data.mode]}</p>
 
             {job.data.status === "done" && job.data.video_url ? (
               job.data.content_type === "video" ? (
@@ -121,19 +171,36 @@ export function JobModal({ jobId, onClose, onRedo }: JobModalProps) {
               <button type="button" onClick={() => onRedo(job.data)}>
                 <span aria-hidden="true">↻</span> Redo
               </button>
-              <button
-                type="button"
-                className="button-danger"
-                onClick={handleDelete}
-                disabled={job.data.status === "processing" || deleteJob.isPending}
-                title={
-                  job.data.status === "processing"
-                    ? "Can't delete a job that's currently processing."
-                    : undefined
-                }
-              >
-                <span aria-hidden="true">🗑</span> {deleteJob.isPending ? "Deleting…" : "Delete"}
-              </button>
+              {confirmingDelete ? (
+                <>
+                  <span className="hint">Delete this job? This can't be undone.</span>
+                  <button
+                    type="button"
+                    className="button-danger"
+                    onClick={handleDelete}
+                    disabled={deleteJob.isPending}
+                  >
+                    {deleteJob.isPending ? "Deleting…" : "Yes, delete"}
+                  </button>
+                  <button type="button" onClick={() => setConfirmingDelete(false)}>
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  className="button-danger"
+                  onClick={() => setConfirmingDelete(true)}
+                  disabled={job.data.status === "processing"}
+                  title={
+                    job.data.status === "processing"
+                      ? "Can't delete a job that's currently processing."
+                      : undefined
+                  }
+                >
+                  <span aria-hidden="true">🗑</span> Delete
+                </button>
+              )}
             </div>
             {deleteJob.isError && <p className="error">Couldn't delete that job. Try again.</p>}
           </>
