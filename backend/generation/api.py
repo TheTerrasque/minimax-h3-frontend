@@ -259,6 +259,11 @@ class GenerationJobSerializer(serializers.Serializer):
         "fall back to raw_prompt, see frontend/src/features/queue/jobTitle.ts.",
     )
     preset_id = serializers.IntegerField()
+    preset_label = serializers.CharField(
+        help_text='The quality tier this job rendered at, e.g. "Draft", "Standard" -- '
+        "job.preset.label, read live (so it reflects the preset's current label, "
+        "not whatever it was named at job-creation time)."
+    )
     duration_id = serializers.IntegerField()
     megapixels = serializers.FloatField()
     aspect_ratio = serializers.CharField()
@@ -585,6 +590,7 @@ def _serialize_job(
         "raw_prompt": job.raw_prompt,
         "title": job.title,
         "preset_id": job.preset_id,
+        "preset_label": job.preset.label,
         "duration_id": job.duration_id,
         "megapixels": job.megapixels,
         "aspect_ratio": job.aspect_ratio,

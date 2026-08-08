@@ -71,12 +71,16 @@ function QueueEntry({ job, onOpen }: { job: GenerationJob; onOpen: () => void })
         <span className="queue-entry-body">
           <span className="queue-entry-title">{titleFor(job)}</span>
           <span className="queue-entry-meta">
-            <span
-              className={`job-status job-status-${job.status} ${failed ? "job-status-failed" : ""}`}
-            >
-              {failed ? "Failed" : STATUS_LABELS[job.status]}
+            <span className="queue-entry-status-time">
+              <span
+                className={`job-status job-status-${job.status} ${failed ? "job-status-failed" : ""}`}
+              >
+                {failed ? "Failed" : STATUS_LABELS[job.status]}
+              </span>
+              <span className="queue-entry-time">{relativeTime(job.created_at)}</span>
+              <span className="queue-entry-id">#{job.id}</span>
             </span>
-            <span className="queue-entry-time">{relativeTime(job.created_at)}</span>
+            <span className="queue-entry-quality">{job.preset_label}</span>
           </span>
           {job.status === "processing" && <JobProgressBar job={job} />}
         </span>

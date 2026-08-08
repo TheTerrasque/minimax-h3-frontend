@@ -144,6 +144,9 @@ export interface GenerationJob {
   // should fall back to raw_prompt, see features/queue/jobTitle.ts.
   title: string;
   preset_id: number;
+  // Quality tier label (e.g. "Draft", "Standard") -- RenderPreset.label, read
+  // live server-side, see api.py's GenerationJobSerializer.
+  preset_label: string;
   duration_id: number;
   megapixels: number;
   aspect_ratio: string;
