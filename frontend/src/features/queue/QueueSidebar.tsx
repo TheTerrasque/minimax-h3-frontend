@@ -27,8 +27,7 @@ function didJobFail(job: GenerationJob): boolean {
 }
 
 function titleFor(job: GenerationJob): string {
-  const title = displayTitle(job);
-  return title.length > 40 ? `${title.slice(0, 40)}…` : title;
+  return displayTitle(job, 40);
 }
 
 function relativeTime(iso: string): string {
