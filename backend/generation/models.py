@@ -208,6 +208,14 @@ class GenerationJob(models.Model):
     estimated_seconds = models.PositiveIntegerField(
         help_text="Snapshot of duration.estimated_render_seconds at queue time."
     )
+    use_spectrum = models.BooleanField(
+        default=False,
+        help_text="Whether this job used the Spectrum step-forecasting accelerator (see "
+        "extras.md) -- resolved from the request + settings.SPECTRUM_LEVEL at queue time "
+        "(generation/api.py::_resolve_use_spectrum), not editable after. Does NOT adjust "
+        "estimated_seconds above -- the real render is faster than that estimate when this "
+        "is set (see extras.md).",
+    )
 
     class Phase(models.TextChoices):
         """Sub-state of a PROCESSING job, per ComfyUI's own three-stage

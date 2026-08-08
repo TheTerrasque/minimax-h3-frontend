@@ -312,6 +312,31 @@ Q_CLUSTER = {
 COMFYUI_BASE_URL = env("COMFYUI_BASE_URL", default="http://host.docker.internal:8000")
 COMFYUI_OUTPUT_ROOT = env("COMFYUI_OUTPUT_ROOT", default="")
 
+# Optional third-party ComfyUI custom-node integrations -- see extras.md.
+# Comma-separated "slug" or "slug=N" tokens, N in {0, 1, 2}:
+#   absent entirely -> off, not offered at all
+#   "spectrum" or "spectrum=0" -> optional, user-facing toggle, default unchecked
+#   "spectrum=1"               -> optional, user-facing toggle, default checked
+#   "spectrum=2"               -> forced on for every job, no toggle shown
+# Parsing is deliberately generic (any "slug=N" token) even though only
+# "spectrum" is wired into the app anywhere below -- see extras.md's "why
+# only one extra is wired up right now" for why this stops short of a full
+# plugin registry.
+_raw_extras = env.list("COMFYUI_EXTRAS", default=[])
+
+
+def _parse_extra_token(token: str) -> tuple[str, int]:
+    slug, _, level = token.partition("=")
+    try:
+        level = max(0, min(2, int(level))) if level else 0
+    except ValueError:
+        level = 0
+    return slug.strip(), level
+
+
+EXTRAS_CONFIG: dict[str, int] = dict(_parse_extra_token(t) for t in _raw_extras if t.strip())
+SPECTRUM_LEVEL = EXTRAS_CONFIG.get("spectrum")  # None | 0 | 1 | 2
+
 LLM_API_BASE_URL = env("LLM_API_BASE_URL", default="")
 # Optional -- many self-hosted OpenAI-compatible servers (llama.cpp server,
 # LM Studio, text-generation-webui, vLLM in permissive mode, etc.) don't

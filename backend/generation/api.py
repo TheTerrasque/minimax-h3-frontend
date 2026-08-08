@@ -85,6 +85,12 @@ class ConfigResponseSerializer(serializers.Serializer):
         "megapixels -- see RenderPreset -- so it isn't part of the preset/duration catalog).",
     )
     default_aspect_ratio = serializers.CharField(help_text="Value to preselect -- see aspect_ratios.")
+    spectrum_level = serializers.IntegerField(
+        allow_null=True,
+        help_text="settings.SPECTRUM_LEVEL: null (not offered), 0 (optional, default off), "
+        "1 (optional, default on), or 2 (forced -- every job uses it, no toggle to show). "
+        "See extras.md#spectrum.",
+    )
 
 
 class ErrorResponseSerializer(serializers.Serializer):
@@ -255,6 +261,10 @@ class GenerationJobSerializer(serializers.Serializer):
     height = serializers.IntegerField()
     duration_seconds = serializers.FloatField()
     estimated_seconds = serializers.IntegerField()
+    use_spectrum = serializers.BooleanField(
+        help_text="Whether this job used the Spectrum accelerator -- see extras.md#spectrum. "
+        "estimated_seconds above does NOT account for it."
+    )
     video_url = serializers.CharField(allow_null=True)
     created_at = serializers.DateTimeField()
     started_at = serializers.DateTimeField(allow_null=True)
@@ -323,6 +333,7 @@ def config(request):
             "oidc_provider_name": oidc_apps[0]["name"] if oidc_apps else "OIDC",
             "aspect_ratios": [{"value": value, "label": label} for value, label in ASPECT_RATIOS],
             "default_aspect_ratio": DEFAULT_ASPECT_RATIO,
+            "spectrum_level": settings.SPECTRUM_LEVEL,
         }
     )
 
@@ -332,6 +343,26 @@ def _validate_mode(data) -> str | Response:
     if mode not in Mode.values:
         return Response({"error": f"mode must be one of {Mode.values}"}, status=400)
     return mode
+
+
+def _resolve_use_spectrum(requested: bool | None) -> bool:
+    """Resolves GenerationJob.use_spectrum from settings.SPECTRUM_LEVEL plus
+    what the client asked for -- the level's meaning is enforced here, not
+    trusted from the client (see extras.md#spectrum for what each level
+    means). `requested` must be None when the client didn't send
+    use_spectrum at all, not just falsy -- a level-1 (default-on) toggle the
+    user actually unchecked has to stay off, and that's only distinguishable
+    from "field omitted" if the frontend always sends an explicit
+    true/false rather than only including it when checked.
+    """
+    level = settings.SPECTRUM_LEVEL
+    if level is None:
+        return False
+    if level == 2:
+        return True
+    if requested is None:
+        return level == 1
+    return requested
 
 
 @extend_schema(
@@ -541,6 +572,7 @@ def _serialize_job(
         "height": job.height,
         "duration_seconds": job.duration_seconds,
         "estimated_seconds": job.estimated_seconds,
+        "use_spectrum": job.use_spectrum,
         "video_url": job.video_file.url if job.video_file else None,
         "created_at": job.created_at,
         "started_at": job.started_at,
@@ -679,6 +711,14 @@ def jobs(request):
         return Response({"error": "raw_prompt is required."}, status=400)
     improved_prompt = request.data.get("improved_prompt", "")
 
+    # None (not "false") means "the client didn't send this field at all" --
+    # see _resolve_use_spectrum for why that distinction matters.
+    use_spectrum_raw = request.data.get("use_spectrum")
+    use_spectrum_requested = (
+        None if use_spectrum_raw is None else str(use_spectrum_raw).lower() in ("1", "true", "yes", "on")
+    )
+    use_spectrum = _resolve_use_spectrum(use_spectrum_requested)
+
     reference_images = request.FILES.getlist("reference_images")
     max_images = _MAX_REFERENCE_IMAGES[mode]
     if len(reference_images) > max_images:
@@ -732,6 +772,7 @@ def jobs(request):
             height=height,
             duration_seconds=duration.duration_seconds,
             estimated_seconds=duration.estimated_render_seconds,
+            use_spectrum=use_spectrum,
         )
         for order, file in enumerate(reference_images):
             ReferenceAsset.objects.create(

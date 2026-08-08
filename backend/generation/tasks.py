@@ -51,7 +51,7 @@ from django.core.files.base import ContentFile
 from django.db import transaction
 from django.utils import timezone
 
-from integrations import comfyui, hooks, media_post
+from integrations import comfyui, hooks, media_post, spectrum
 
 from .models import CONTENT_TYPE_BY_MODE, REFERENCE_FLOW_MODES, ContentType, GenerationJob, Mode, ReferenceAsset
 
@@ -163,6 +163,7 @@ def build_api_workflow(
     last_frame_upload: str | None = None,
     ref_image_uploads: list[str] | None = None,
     ref_audio_uploads: list[str] | None = None,
+    use_spectrum: bool = False,
 ) -> dict[str, Any]:
     """Loads the mode's API-format template and patches in the given values.
 
@@ -170,6 +171,14 @@ def build_api_workflow(
     integrations.comfyui.upload_media) for any reference images/audio --
     doesn't upload anything itself, so it has no DB/network dependency beyond
     reading the template file.
+
+    use_spectrum splices in the Spectrum step-forecasting accelerator (see
+    integrations/spectrum.py, extras.md#spectrum) -- only ever True when
+    settings.SPECTRUM_LEVEL actually enables it for this job (resolved at
+    job-creation time by generation/api.py::_resolve_use_spectrum onto
+    GenerationJob.use_spectrum; this function doesn't re-check the setting
+    itself, same as it doesn't re-validate any other already-resolved job
+    field).
     """
     workflow = _load_api_workflow(mode)
     nodes = _R2V_NODES if mode in REFERENCE_FLOW_MODES else _T2V_I2V_NODES
@@ -225,6 +234,9 @@ def build_api_workflow(
             node_id = _add_load_image_node(workflow, last_frame_upload)
             sampler["last_frame"] = [node_id, 0]
 
+    if use_spectrum:
+        workflow = spectrum.apply_spectrum(workflow)
+
     return workflow
 
 
@@ -278,6 +290,7 @@ def _build_workflow_for_job(job: GenerationJob) -> dict[str, Any]:
         last_frame_upload=last_frame_upload,
         ref_image_uploads=ref_image_uploads,
         ref_audio_uploads=ref_audio_uploads,
+        use_spectrum=job.use_spectrum,
     )
 
 

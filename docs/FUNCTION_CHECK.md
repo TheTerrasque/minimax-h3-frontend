@@ -367,9 +367,8 @@ filter(preset__mode=mode)}`, copied out of the container, not just to
 snapshot afterward. `apply` is necessarily mode-wide (it has to touch
 every level to be useful), so testing it against a real mode's real data
 without a snapshot **will** contaminate real catalog numbers with
-synthetic test data — this actually happened once (documented in
-`todo.md`'s twenty-first pass) and had to be recovered from the
-documented seed formula rather than an exact backup. Prefer testing
+synthetic test data — this actually happened once and had to be recovered
+from the documented seed formula rather than an exact backup. Prefer testing
 against a mode with no real completed-job history if one exists, or take
 the snapshot regardless.
 
@@ -489,16 +488,15 @@ handles exactly this). Point it at `http://localhost:8080/` (or whatever
     two-row header (`Label`/`Draft` spanning both, then `MP`/`Steps`/
     `Active` sub-columns per mode) and every sub-column's body cell
     aligned directly under its header — not stacked in a single column (a
-    real bug here is documented in `todo.md`'s nineteenth pass, caused by
-    `display: flex` on a `<td>` breaking table layout; if it recurs the
-    symptom is every mode's data appearing under the first mode column
-    with the others empty — verify with `getBoundingClientRect()` on
-    header vs. body cells, not just a screenshot). Rename a level inline
-    (blur commits it, every mode's row renamed together). Toggle a mode's
-    "active" checkbox off — it must visually uncheck **immediately** on
-    click, not lag or silently revert (the checkboxes here use local
-    optimistic state for exactly this reason, see `todo.md`'s nineteenth
-    pass). **Reorder**: click a row's ▲/▼ buttons and confirm adjacent
+    real bug here was caused by `display: flex` on a `<td>` breaking table
+    layout; if it recurs the symptom is every mode's data appearing under
+    the first mode column with the others empty — verify with
+    `getBoundingClientRect()` on header vs. body cells, not just a
+    screenshot). Rename a level inline (blur commits it, every mode's row
+    renamed together). Toggle a mode's "active" checkbox off — it must
+    visually uncheck **immediately** on click, not lag or silently revert
+    (the checkboxes here use local optimistic state for exactly this
+    reason). **Reorder**: click a row's ▲/▼ buttons and confirm adjacent
     rows swap and the new order survives a reload; drag a row's ⠿ handle
     onto another row and confirm the same — this is also the order the
     quality dropdown uses on the Generate screen (`/`), worth spot-checking
@@ -533,9 +531,9 @@ handles exactly this). Point it at `http://localhost:8080/` (or whatever
     than overflowing the page; the nav wraps the username/logout onto its
     own row rather than pushing it off-screen
     (`document.documentElement.scrollWidth` should equal the viewport
-    width — a real bug here, caught by exactly this check, is documented in
-    `todo.md`'s eighteenth pass); the job modal is usable as a near-full-
-    screen sheet, not a cramped dialog with wasted margin.
+    width — a real bug here was caught by exactly this check); the job
+    modal is usable as a near-full-screen sheet, not a cramped dialog with
+    wasted margin.
 
 ## 3. Known-expected non-failures
 

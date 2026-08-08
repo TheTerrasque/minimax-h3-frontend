@@ -246,6 +246,10 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
   // to load, so the matching preset/duration can be resolved once they do --
   // see the two effects below.
   const [pendingRedoDurationId, setPendingRedoDurationId] = useState<number | null>(null);
+  // null until config loads, then defaults to spectrum_level === 1 (see the
+  // effect near default_aspect_ratio's) -- not reset on submit, it's a
+  // sticky preference like presetId/aspectRatio, not one-off content.
+  const [useSpectrum, setUseSpectrum] = useState<boolean | null>(null);
 
   const [rawPrompt, setRawPrompt] = useState("");
   const [improvedPrompt, setImprovedPrompt] = useState("");
@@ -427,6 +431,12 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
     setAspectRatio(config.data.default_aspect_ratio);
   }, [config.data, aspectRatio]);
 
+  // Default the Spectrum toggle once config loads (see extras.md#spectrum).
+  useEffect(() => {
+    if (useSpectrum != null || config.data?.spectrum_level == null) return;
+    setUseSpectrum(config.data.spectrum_level === 1);
+  }, [config.data, useSpectrum]);
+
   // i2v's first frame gets its own aspect-ratio option, auto-selected, so
   // the render actually matches what's being animated instead of forcing it
   // into the nearest fixed preset -- see computeImageAspectRatio.
@@ -554,6 +564,12 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
       referenceImages,
       referenceAudio: MAX_REFERENCE_AUDIO[mode] > 0 ? referenceAudio : undefined,
       chatTranscript: chatMessages.length ? chatMessages : undefined,
+      useSpectrum:
+        config.data?.spectrum_level == null
+          ? undefined
+          : config.data.spectrum_level === 2
+            ? true
+            : (useSpectrum ?? false),
     });
     setRawPrompt("");
     setImprovedPrompt("");
@@ -670,6 +686,25 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
             </label>
           )}
         </div>
+
+        {config.data?.spectrum_level != null && (
+          <p className="hint spectrum-hint">
+            {config.data.spectrum_level === 2 ? (
+              <span>⚡ Spectrum acceleration is always on for this deployment.</span>
+            ) : (
+              <label>
+                <input
+                  type="checkbox"
+                  checked={useSpectrum ?? config.data.spectrum_level === 1}
+                  onChange={(e) => setUseSpectrum(e.target.checked)}
+                />{" "}
+                ⚡ Spectrum acceleration (experimental)
+              </label>
+            )}{" "}
+            Faster rendering via approximate step-skipping; may shift fast motion or fine detail
+            slightly. The time estimate above doesn't account for the speedup.
+          </p>
+        )}
 
         {mode === "i2v" && (
           <fieldset>

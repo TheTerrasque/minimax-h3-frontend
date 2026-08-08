@@ -127,7 +127,7 @@ There is no open signup. Two ways to get an account:
   lists existing invites (active/redeemed/expired) with copy-link and
   revoke actions.
 
-See `ARCHITECTURE.md`'s "Backend apps" section for the full rationale.
+See `docs/ARCHITECTURE.md`'s "Backend apps" section for the full rationale.
 
 ## Configuration
 
@@ -166,6 +166,7 @@ See [`resources/COMFYUI_API_GUIDE.md`](resources/COMFYUI_API_GUIDE.md) for how t
 |---|---|---|
 | `COMFYUI_BASE_URL` | `http://host.docker.internal:8000` | Base URL of the ComfyUI instance to submit jobs to. `host.docker.internal` reaches the Docker *host* machine (e.g. ComfyUI Desktop running alongside this stack); point it at any reachable host:port instead if ComfyUI runs elsewhere (as it does in this project's own deployment — a separate GPU machine on the LAN). |
 | `COMFYUI_OUTPUT_ROOT` | *(empty)* | Absolute filesystem path to ComfyUI's `output/` folder, if reachable from this machine — used to delete a generated video from ComfyUI's disk right after downloading it, so it doesn't linger there. Leave blank to skip that cleanup step (ComfyUI just keeps every output forever on its own disk). |
+| `COMFYUI_EXTRAS` | *(empty)* | Optional third-party ComfyUI custom-node integrations — see [`docs/extras.md`](docs/extras.md). Comma-separated `slug` or `slug=N` tokens (`N` in 0/1/2 — optional-off, optional-on-by-default, forced). Only `spectrum` does anything right now, e.g. `COMFYUI_EXTRAS=spectrum=1`. |
 
 ### LLM prompt-assist (optional)
 
@@ -214,7 +215,7 @@ nothing's listening there — after the account was already created.**
 
 | Variable | Default | Description |
 |---|---|---|
-| `Q_CLUSTER_WORKERS` | `1` | Number of Django-Q2 worker processes. **Keep at 1** — jobs are processed strictly one at a time, FIFO (see `ARCHITECTURE.md`'s `tasks.py` bullet); raising this would let multiple jobs render in parallel, breaking that guarantee (and ComfyUI itself only renders one job at a time regardless, so there's no throughput to gain). |
+| `Q_CLUSTER_WORKERS` | `1` | Number of Django-Q2 worker processes. **Keep at 1** — jobs are processed strictly one at a time, FIFO (see `docs/ARCHITECTURE.md`'s `tasks.py` bullet); raising this would let multiple jobs render in parallel, breaking that guarantee (and ComfyUI itself only renders one job at a time regardless, so there's no throughput to gain). |
 | `Q_CLUSTER_TIMEOUT` | `3600` | Hard wall-clock kill (seconds) of the worker process if a single render runs longer than this. Raise it if renders on your hardware/models routinely run long — the old 1200s default was already too tight for a genuine ~20 minute render (see `settings.py`'s `Q_CLUSTER` comment). |
 
 ## Useful commands
@@ -229,8 +230,12 @@ docker compose exec backend python manage.py shell
 # sweep (resolution, duration) combinations against the real ComfyUI to
 # find what's actually viable and how long it takes -- spends real GPU
 # time and can crash ComfyUI on oversized combinations by design (that's
-# the point); see ARCHITECTURE.md's "Benchmarking render times"
+# the point); see docs/ARCHITECTURE.md's "Benchmarking render times"
 docker compose exec backend python manage.py benchmark_render_times --help
+
+# check whether COMFYUI_EXTRAS' ComfyUI-side custom nodes are actually
+# installed on the configured ComfyUI instance -- see docs/extras.md
+docker compose exec backend python manage.py check_extras
 ```
 
 ## Required ComfyUI models
@@ -320,19 +325,20 @@ always safe — the exporter and `tasks.py` don't care what a node's
 replace, or rewire one of those specific nodes (or otherwise change the
 graph structure around them), you'll need to update the matching node ID
 constants in `generation/tasks.py` to match, or job submission will patch
-the wrong node (or crash). See `ARCHITECTURE.md`'s "Getting the workflows
-working" section for the full technical rationale (including how the
-exporter itself works) and `resources/COMFYUI_API_GUIDE.md` for the ComfyUI
-API this all targets.
+the wrong node (or crash). See `docs/ARCHITECTURE.md`'s "Getting the
+workflows working" section for the full technical rationale (including how
+the exporter itself works) and `resources/COMFYUI_API_GUIDE.md` for the
+ComfyUI API this all targets.
 
 ## Project structure
 
-See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full breakdown. Briefly:
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full breakdown. Briefly:
 
 ```
 backend/       Django API (uv-managed) -- accounts, generation, integrations
 frontend/      React SPA (Vite + TS), served by nginx in front of everything
 resources/     Product brief, ComfyUI workflows + API guide, prompt-writing guides
+docs/          Architecture writeup, function-check procedure, ComfyUI extras
 docker-compose.yml   The whole stack: db, migrate, backend, qcluster, frontend
 ```
 
@@ -340,8 +346,8 @@ docker-compose.yml   The whole stack: db, migrate, backend, qcluster, frontend
 
 Verified end-to-end against a real ComfyUI instance — log in, queue a job,
 watch it render live, download the result — not just written and assumed
-to work. See [`FUNCTION_CHECK.md`](FUNCTION_CHECK.md) for the repeatable
-procedure that confirms this yourself.
+to work. See [`docs/FUNCTION_CHECK.md`](docs/FUNCTION_CHECK.md) for the
+repeatable procedure that confirms this yourself.
 
 Known rough edges:
 
@@ -349,8 +355,5 @@ Known rough edges:
   yet benchmarked for real — run `manage.py benchmark_render_times` to
   tune them for your own hardware (see [Useful commands](#useful-commands)).
 - A few deferred pieces don't have a frontend yet — see
-  [`ARCHITECTURE.md`](ARCHITECTURE.md)'s "Deferred" section for exactly
-  what's built vs. not.
-
-[`todo.md`](todo.md) has a chronological log of how this project came
-together, if you're curious.
+  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)'s "Deferred" section for
+  exactly what's built vs. not.

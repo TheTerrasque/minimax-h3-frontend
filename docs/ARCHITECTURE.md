@@ -1,9 +1,9 @@
 # Architecture
 
 Friendly web frontend for the MiniMax H3 ComfyUI video workflows in
-[`resources/workflows/`](resources/workflows/) — see
-[`resources/features.md`](resources/features.md) for the product brief and
-[`resources/COMFYUI_API_GUIDE.md`](resources/COMFYUI_API_GUIDE.md) for how the
+[`resources/workflows/`](../resources/workflows/) — see
+[`resources/features.md`](../resources/features.md) for the product brief and
+[`resources/COMFYUI_API_GUIDE.md`](../resources/COMFYUI_API_GUIDE.md) for how the
 backend talks to ComfyUI. This document describes the structure/architecture
 scaffold built for it: what exists, why it's shaped this way, and what's
 deliberately not built yet.
@@ -53,7 +53,7 @@ deliberately not built yet.
 port. It serves the built SPA at `/` and reverse-proxies `/api/`,
 `/accounts/`, `/admin/`, `/invite/`, `/static/`, `/media/` straight to the
 `backend` container (see
-[`frontend/nginx.conf.template`](frontend/nginx.conf.template)). The
+[`frontend/nginx.conf.template`](../frontend/nginx.conf.template)). The
 browser therefore only ever talks to one origin.
 
 **Routing gotcha, worth remembering before adding SPA routes**: nginx's
@@ -1410,3 +1410,28 @@ Intentionally not built in this pass:
   is plain component state in `App.tsx`'s `MainLayout`, not synced to the
   URL (no `?job=<id>`); a deliberate simplification, easy to add later if
   bookmarking/sharing a specific job's view turns out to matter.
+- **Clip-chaining extras (e.g. ComfyUI-H3-Motion-Context)** — see
+  `extras.md`'s Motion Context section for the full write-up. Unlike
+  Spectrum (the one extra actually wired in, a per-job workflow-graph
+  patch), chaining clips together is a stateful, multi-job feature: it
+  needs the previous job's *latent* to survive past render completion
+  (today's `tasks.py::_finish_job_from_history` deletes ComfyUI's copy of
+  the output right after download, and only final video/image/audio bytes
+  are ever persisted — never a latent), plus a "continue from job X"
+  concept in both the data model (`GenerationJob` has no notion of a parent
+  job) and the UI (no "continue this render" action in job history). Worth
+  designing properly if/when it's actually wanted, not bolted on as another
+  boolean.
+- **A general "extras" plugin registry** — the current `COMFYUI_EXTRAS`
+  mechanism (`config/settings.py`) is deliberately a single purpose-built
+  boolean (`GenerationJob.use_spectrum`) plus one splice function
+  (`integrations/spectrum.py`), not a registry or an admin-tunable parameter
+  system, and it doesn't account for an extra in the render-time estimate
+  (`generation/queue.py`) — see `extras.md`'s closing section for why. Worth
+  factoring out once a second extra actually gets wired in. There's also no
+  live *status page* — `manage.py check_extras`
+  (`generation/management/commands/check_extras.py`) covers the CLI/admin
+  diagnostic case (which of `COMFYUI_EXTRAS`' nodes are actually installed
+  on the configured ComfyUI instance right now, via
+  `integrations/comfyui.get_object_info()`); a `/manage` panel surfacing the
+  same thing in the browser is still just an idea, not built.

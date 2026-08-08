@@ -81,6 +81,12 @@ export interface CreateJobInput {
    * this same job-creation call; the live chat itself never touches the
    * DB, see useChatReply() below. */
   chatTranscript?: ChatMessage[];
+  /** Only meaningful when AppConfig.spectrum_level is 0 or 1 (an optional
+   * toggle) -- see extras.md#spectrum. Always sent explicitly (never
+   * omitted) so the backend can tell "unchecked" apart from "not sent",
+   * which matters for a level-1 (default-on) toggle -- see
+   * generation/api.py::_resolve_use_spectrum. */
+  useSpectrum?: boolean;
 }
 
 export function useCreateJob() {
@@ -97,6 +103,9 @@ export function useCreateJob() {
       for (const file of input.referenceAudio ?? []) form.append("reference_audio", file);
       if (input.chatTranscript?.length) {
         form.set("chat_transcript", JSON.stringify(input.chatTranscript));
+      }
+      if (input.useSpectrum !== undefined) {
+        form.set("use_spectrum", input.useSpectrum ? "true" : "false");
       }
       return apiFetch<GenerationJobDetail>("/jobs/", { method: "POST", body: form });
     },

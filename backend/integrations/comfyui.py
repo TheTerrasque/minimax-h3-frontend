@@ -215,6 +215,23 @@ def check_for_error(history_record: dict[str, Any]) -> None:
     raise ComfyUIExecutionError(f"ComfyUI execution failed: {detail}")
 
 
+def get_object_info(class_type: str) -> dict[str, Any] | None:
+    """GET /object_info/{class_type} -- ComfyUI's own registry of installed
+    node types. Returns that node's schema dict if it's registered, None if
+    not. Confirmed live against a real instance: ComfyUI answers 200 with an
+    empty {} for an unknown class_type -- it never 404s here, so an empty
+    body (not the HTTP status) is the actual "not installed" signal.
+
+    Purely a diagnostic (see generation/management/commands/check_extras.py,
+    extras.md) -- never called from the actual render path (tasks.py), which
+    finds out whether a node exists the same way it always has: ComfyUI's
+    own /prompt validation rejects an unknown node type with a clear error.
+    """
+    resp = requests.get(f"{_base_url()}/object_info/{class_type}", timeout=15)
+    resp.raise_for_status()
+    return resp.json().get(class_type)
+
+
 def is_alive(timeout: float = 5.0) -> bool:
     """Cheap reachability check (GET /system_stats) -- used to tell a
     genuinely crashed/unreachable ComfyUI process apart from a prompt that's

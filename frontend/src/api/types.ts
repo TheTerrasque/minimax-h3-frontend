@@ -54,6 +54,10 @@ export interface AppConfig {
   // fixed enum from config rather than part of the preset/duration catalog.
   aspect_ratios: AspectRatioOption[];
   default_aspect_ratio: string;
+  // null: not offered. 0: optional toggle, default off. 1: optional toggle,
+  // default on. 2: forced on for every job, no toggle to show. See
+  // extras.md#spectrum.
+  spectrum_level: 0 | 1 | 2 | null;
 }
 
 export interface CurrentUser {
@@ -143,6 +147,9 @@ export interface GenerationJob {
   height: number;
   duration_seconds: number;
   estimated_seconds: number;
+  // Whether this job used the Spectrum accelerator -- see extras.md#spectrum.
+  // estimated_seconds above does NOT account for it.
+  use_spectrum: boolean;
   video_url: string | null;
   created_at: string;
   started_at: string | null;
