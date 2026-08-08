@@ -167,6 +167,7 @@ See [`resources/COMFYUI_API_GUIDE.md`](resources/COMFYUI_API_GUIDE.md) for how t
 | `COMFYUI_BASE_URL` | `http://host.docker.internal:8000` | Base URL of the ComfyUI instance to submit jobs to. `host.docker.internal` reaches the Docker *host* machine (e.g. ComfyUI Desktop running alongside this stack); point it at any reachable host:port instead if ComfyUI runs elsewhere (as it does in this project's own deployment — a separate GPU machine on the LAN). |
 | `COMFYUI_OUTPUT_ROOT` | *(empty)* | Absolute filesystem path to ComfyUI's `output/` folder, if reachable from this machine — used to delete a generated video from ComfyUI's disk right after downloading it, so it doesn't linger there. Leave blank to skip that cleanup step (ComfyUI just keeps every output forever on its own disk). |
 | `COMFYUI_EXTRAS` | *(empty)* | Optional third-party ComfyUI custom-node integrations — see [`docs/extras.md`](docs/extras.md). Comma-separated `slug` or `slug=N` tokens (`N` in 0/1/2 — optional-off, optional-on-by-default, forced). Only `spectrum` does anything right now, e.g. `COMFYUI_EXTRAS=spectrum=1`. |
+| `COMFYUI_REQUEST_TIMEOUT` | `15` | Read timeout (seconds) for ComfyUI's short-lived JSON endpoints (`/history`, `/queue`, `/object_info`, `/interrupt`, etc.) — *not* the upload/download calls, which already scale their own timeout with payload size. Raise this if jobs occasionally fail with `Read timed out` even though ComfyUI is reachable — a busy/loaded GPU host can be slow to answer a poll without actually being down. |
 
 ### LLM prompt-assist (optional)
 

@@ -311,6 +311,16 @@ Q_CLUSTER = {
 # configured in django settings").
 COMFYUI_BASE_URL = env("COMFYUI_BASE_URL", default="http://host.docker.internal:8000")
 COMFYUI_OUTPUT_ROOT = env("COMFYUI_OUTPUT_ROOT", default="")
+# Read timeout (seconds) for ComfyUI's short-lived JSON endpoints (/history,
+# /queue, /object_info, /interrupt, etc. -- see integrations/comfyui.py).
+# NOT used for the few calls that already have their own longer, payload-
+# size-driven timeout (upload_media's 30s, download_output's 60s). The
+# default of 15s can be too tight for a ComfyUI host that's slow to respond
+# while it's busy actually rendering (e.g. a loaded/underpowered GPU box) --
+# a request timing out here surfaces as a job failure ("Read timed out")
+# even though ComfyUI was never actually unreachable, just slow to answer
+# that one poll.
+COMFYUI_REQUEST_TIMEOUT = env.float("COMFYUI_REQUEST_TIMEOUT", default=15.0)
 
 # Optional third-party ComfyUI custom-node integrations -- see extras.md.
 # Comma-separated "slug" or "slug=N" tokens, N in {0, 1, 2}:

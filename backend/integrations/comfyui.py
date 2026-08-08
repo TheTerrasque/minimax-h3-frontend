@@ -53,6 +53,15 @@ def _base_url() -> str:
     return settings.COMFYUI_BASE_URL.rstrip("/")
 
 
+def _request_timeout() -> float:
+    """Read timeout (seconds) for ComfyUI's short-lived JSON endpoints --
+    see settings.COMFYUI_REQUEST_TIMEOUT's own docstring for why this is
+    configurable (a slow-but-alive ComfyUI host can otherwise turn into a
+    spurious job failure). NOT used for upload_media/download_output, which
+    already have their own longer, payload-size-driven timeouts."""
+    return settings.COMFYUI_REQUEST_TIMEOUT
+
+
 def upload_media(file_bytes: bytes, filename: str, subfolder: str = "") -> str:
     """Uploads any media file (image/audio/video) into ComfyUI's input folder.
 
@@ -102,7 +111,7 @@ def wait_for_result(
     while time.monotonic() < deadline:
         if cancel_check is not None and cancel_check():
             raise ComfyUICancelled(f"ComfyUI prompt {prompt_id} was cancelled while waiting.")
-        resp = requests.get(f"{_base_url()}/history/{prompt_id}", timeout=15)
+        resp = requests.get(f"{_base_url()}/history/{prompt_id}", timeout=_request_timeout())
         resp.raise_for_status()
         history = resp.json()
         if prompt_id in history:
@@ -212,7 +221,7 @@ def get_history(prompt_id: str) -> dict[str, Any] | None:
     while nothing was watching, without re-waiting for something that may
     already be done.
     """
-    resp = requests.get(f"{_base_url()}/history/{prompt_id}", timeout=15)
+    resp = requests.get(f"{_base_url()}/history/{prompt_id}", timeout=_request_timeout())
     resp.raise_for_status()
     return resp.json().get(prompt_id)
 
@@ -224,7 +233,7 @@ def is_prompt_queued(prompt_id: str) -> bool:
     apart from "ComfyUI has no record of this at all anymore" -- those need
     very different recovery actions.
     """
-    resp = requests.get(f"{_base_url()}/queue", timeout=15)
+    resp = requests.get(f"{_base_url()}/queue", timeout=_request_timeout())
     resp.raise_for_status()
     data = resp.json()
     queued_ids = {entry[1] for entry in data.get("queue_running", [])}
@@ -261,7 +270,7 @@ def get_object_info(class_type: str) -> dict[str, Any] | None:
     finds out whether a node exists the same way it always has: ComfyUI's
     own /prompt validation rejects an unknown node type with a clear error.
     """
-    resp = requests.get(f"{_base_url()}/object_info/{class_type}", timeout=15)
+    resp = requests.get(f"{_base_url()}/object_info/{class_type}", timeout=_request_timeout())
     resp.raise_for_status()
     return resp.json().get(class_type)
 
@@ -313,7 +322,7 @@ def delete_output_file(output: ComfyUIOutput) -> None:
 
 
 def clear_history(prompt_id: str) -> None:
-    requests.post(f"{_base_url()}/history", json={"delete": [prompt_id]}, timeout=15)
+    requests.post(f"{_base_url()}/history", json={"delete": [prompt_id]}, timeout=_request_timeout())
 
 
 def cancel_prompt(prompt_id: str) -> None:
@@ -333,10 +342,10 @@ def cancel_prompt(prompt_id: str) -> None:
     succeeds in reaching ComfyUI at all.
     """
     try:
-        requests.post(f"{_base_url()}/queue", json={"delete": [prompt_id]}, timeout=15)
+        requests.post(f"{_base_url()}/queue", json={"delete": [prompt_id]}, timeout=_request_timeout())
     except requests.exceptions.RequestException:
         logger.warning("Failed to dequeue ComfyUI prompt %s while cancelling", prompt_id, exc_info=True)
     try:
-        requests.post(f"{_base_url()}/interrupt", timeout=15)
+        requests.post(f"{_base_url()}/interrupt", timeout=_request_timeout())
     except requests.exceptions.RequestException:
         logger.warning("Failed to interrupt ComfyUI while cancelling prompt %s", prompt_id, exc_info=True)
