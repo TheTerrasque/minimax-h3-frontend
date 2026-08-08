@@ -51,8 +51,6 @@ whatever` runs the *old* code.
 
 ## Git
 
-- Only commit when explicitly asked — this repo's own instructions (and
-  every session so far) confirm that.
 - **Commit after each logical chunk**, not one giant commit at the end —
   this session's history is a good model: one commit per feature/fix
   (extras toggle, docs reorg, the six `frontend fixes.txt` items, the
@@ -67,9 +65,12 @@ whatever` runs the *old* code.
 
 ## Backend dev loop
 
-- This repo uses `uv`, not a bare `pip`/venv — `python` isn't even on
-  `PATH` in this environment. Run everything as
-  `cd backend && uv run python manage.py <command>`.
+- This repo uses `uv`, not a bare `pip`/venv — plain `python` isn't on
+  `PATH` here, but the Windows `py` launcher and `uv` itself are. Still run
+  backend commands as `cd backend && uv run python manage.py <command>`,
+  not `py`/a bare `python` — `uv run` is what actually puts this project's
+  own `.venv` (and its installed deps) on the path; `py` alone would hit
+  whatever Python it defaults to instead.
 - **No live DB from the host shell** — `DB_HOST=db` only resolves inside
   the Compose network, so `manage.py migrate`, `migrate --plan`, etc. fail
   locally with `failed to resolve host 'db'`. What *does* work locally
@@ -119,6 +120,12 @@ Before calling frontend work done: `npx tsc --noEmit` (type-check),
   docstrings/comments that cross-reference other files by name (e.g. "see
   `ARCHITECTURE.md`'s Deferred section") — match that style in new code
   rather than comments that just restate what the code does.
+- **Keep these docs updated as part of the change that needs it**, not as
+  a followup — a new feature, config option, endpoint, or gotcha belongs in
+  the relevant doc (and this file, if it's operational) in the same commit,
+  same as the code-level cross-referencing above. A stale README/
+  ARCHITECTURE.md is worse than none, in a repo this deliberate about
+  cross-references actually being accurate.
 
 ## Before calling something done
 
