@@ -160,11 +160,11 @@ mattering — out of scope here since this pass is Docker-first.
   command first re-queues any job left stuck `processing` by a previous
   `qcluster` restart (see `recover_orphaned_processing_jobs()` in
   `tasks.py`), then starts the Django-Q2 worker that executes
-  `generation.tasks.process_queue`. Pinned to a single worker
-  (`Q_CLUSTER_WORKERS=1`, timeout configurable via `Q_CLUSTER_TIMEOUT`) so
-  jobs render strictly one at a time, FIFO — see `tasks.py`'s bullet under
-  "Backend apps" for why that's enforced at the DB-query level, not by
-  Django-Q2's own worker count.
+  `generation.tasks.process_queue`. Pinned to a single worker (hardcoded
+  `"workers": 1` in `settings.py`'s `Q_CLUSTER`, timeout configurable via
+  `Q_CLUSTER_TIMEOUT`) so jobs render strictly one at a time, FIFO — see
+  `tasks.py`'s bullet under "Backend apps" for why that's enforced at the
+  DB-query level, not by Django-Q2's own worker count.
 - **`frontend`** — `nginxinc/nginx-unprivileged`, running as a non-root
   user (so it satisfies Kubernetes' "restricted" Pod Security Standard with
   no `securityContext` workarounds); the stack's one published port
@@ -198,7 +198,7 @@ backend-image-based service. See `.env.example` for the full list
 (`SECURE_SSL_REDIRECT`/`SESSION_COOKIE_SECURE`/`CSRF_COOKIE_SECURE`/
 `SECURE_HSTS_SECONDS`), ComfyUI/LLM endpoints, OIDC settings, email
 settings (falls back to the console backend when `EMAIL_HOST` is unset),
-`Q_CLUSTER_WORKERS`/`Q_CLUSTER_TIMEOUT`) — this is also how features.md
+`Q_CLUSTER_TIMEOUT`) — this is also how features.md
 item 12 ("Endpoints for comfyui and llm should be configured in django
 settings") is satisfied.
 

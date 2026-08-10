@@ -216,8 +216,9 @@ nothing's listening there — after the account was already created.**
 
 | Variable | Default | Description |
 |---|---|---|
-| `Q_CLUSTER_WORKERS` | `1` | Number of Django-Q2 worker processes. **Keep at 1** — jobs are processed strictly one at a time, FIFO (see `docs/ARCHITECTURE.md`'s `tasks.py` bullet); raising this would let multiple jobs render in parallel, breaking that guarantee (and ComfyUI itself only renders one job at a time regardless, so there's no throughput to gain). |
 | `Q_CLUSTER_TIMEOUT` | `3600` | Hard wall-clock kill (seconds) of the worker process if a single render runs longer than this. Raise it if renders on your hardware/models routinely run long — the old 1200s default was already too tight for a genuine ~20 minute render (see `settings.py`'s `Q_CLUSTER` comment). |
+
+Worker count (Django-Q2) is hardcoded to 1, not configurable — jobs are processed strictly one at a time, FIFO (see `docs/ARCHITECTURE.md`'s `tasks.py` bullet); raising it would let multiple jobs render in parallel, breaking that guarantee (and ComfyUI itself only renders one job at a time regardless, so there's no throughput to gain).
 
 ## Useful commands
 

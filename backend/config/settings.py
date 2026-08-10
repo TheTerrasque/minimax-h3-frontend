@@ -269,15 +269,15 @@ SPECTACULAR_SETTINGS = {
 }
 
 
-# Django-Q2 -- ORM broker, no Redis/RabbitMQ. Deliberately 1 worker: jobs
-# are meant to be processed strictly one at a time, FIFO (see
-# generation/tasks.py's process_queue()/module docstring) -- that ordering
-# and one-at-a-time-ness is enforced there by an explicit DB claim query,
-# not by Django-Q2 itself (its ORM broker's dequeue has no ORDER BY, so
-# task pickup order isn't otherwise guaranteed), but a second worker slot
-# would let two *different* jobs run in parallel regardless of claim order,
-# which the DB-level row locking alone doesn't prevent. Don't raise this
-# without redesigning that.
+# Django-Q2 -- ORM broker, no Redis/RabbitMQ. Deliberately 1 worker, hardcoded
+# (not an env knob, unlike the settings below) -- jobs are meant to be
+# processed strictly one at a time, FIFO (see generation/tasks.py's
+# process_queue()/module docstring) -- that ordering and one-at-a-time-ness
+# is enforced there by an explicit DB claim query, not by Django-Q2 itself
+# (its ORM broker's dequeue has no ORDER BY, so task pickup order isn't
+# otherwise guaranteed), but a second worker slot would let two *different*
+# jobs run in parallel regardless of claim order, which the DB-level row
+# locking alone doesn't prevent. Don't raise this without redesigning that.
 #
 # "timeout" is a hard wall-clock kill of the worker process, unrelated to
 # any timeout inside generation/tasks.py/integrations/comfyui.py (those
@@ -296,7 +296,7 @@ _Q_CLUSTER_TIMEOUT = env.int("Q_CLUSTER_TIMEOUT", default=3600)
 Q_CLUSTER = {
     "name": "mm_h3",
     "orm": "default",
-    "workers": env.int("Q_CLUSTER_WORKERS", default=1),
+    "workers": 1,
     "timeout": _Q_CLUSTER_TIMEOUT,
     "retry": _Q_CLUSTER_TIMEOUT + 300,
     "queue_limit": 50,
