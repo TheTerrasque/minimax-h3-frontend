@@ -52,9 +52,10 @@ from django.core.files.base import ContentFile
 from django.db import transaction
 from django.utils import timezone
 
-from integrations import comfyui, hooks, media_post, spectrum, video_ref
+from integrations import comfyui, hooks, media_post, motion_context, spectrum, video_ref
 
 from .models import CONTENT_TYPE_BY_MODE, REFERENCE_FLOW_MODES, ContentType, GenerationJob, Mode, ReferenceAsset
+from .signals import job_finished
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +170,7 @@ def build_api_workflow(
     ref_audio_uploads: list[str] | None = None,
     ref_video_uploads: list[str] | None = None,
     use_spectrum: bool = False,
+    continuation_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Loads the mode's API-format template and patches in the given values.
 
@@ -254,6 +256,11 @@ def build_api_workflow(
     if use_spectrum:
         workflow = spectrum.apply_spectrum(workflow)
 
+    if continuation_params:
+        # Director Mode only (see GenerationJob.continuation_params'
+        # docstring) -- generation has no other knowledge of director.
+        workflow = motion_context.apply_motion_context(workflow, mode=mode, **continuation_params)
+
     return workflow
 
 
@@ -315,6 +322,7 @@ def _build_workflow_for_job(job: GenerationJob) -> dict[str, Any]:
         ref_audio_uploads=ref_audio_uploads,
         ref_video_uploads=ref_video_uploads,
         use_spectrum=job.use_spectrum,
+        continuation_params=job.continuation_params,
     )
 
 
@@ -391,8 +399,21 @@ def _finish_job_from_history(job: GenerationJob, history_record: dict[str, Any])
     filename, output_bytes = _postprocess_output(job, output, video_bytes)
 
     job.video_file.save(filename, ContentFile(output_bytes), save=False)
+    # Recorded regardless of mode/keep_comfyui_output -- see the field's own
+    # docstring in models.py.
+    job.comfyui_output_filename = output.filename
+    job.comfyui_output_subfolder = output.subfolder
 
-    update_fields = ["video_file", "status", "finished_at", "phase", "progress_current", "progress_total"]
+    update_fields = [
+        "video_file",
+        "comfyui_output_filename",
+        "comfyui_output_subfolder",
+        "status",
+        "finished_at",
+        "phase",
+        "progress_current",
+        "progress_total",
+    ]
     if CONTENT_TYPE_BY_MODE[job.mode] == ContentType.VIDEO:
         # Best-effort: a poster image is a nice-to-have for the queue list
         # (see QueueSidebar's QueueThumb), not the actual output -- video_file
@@ -414,7 +435,12 @@ def _finish_job_from_history(job: GenerationJob, history_record: dict[str, Any])
 
     # Don't leave a copy on the ComfyUI machine now that we have it, and
     # tidy the history entry -- see resources/COMFYUI_API_GUIDE.md #10.
-    comfyui.delete_output_file(output)
+    # keep_comfyui_output is the one exception: a director-created Clip's
+    # job leaves its output in place so the *next* continuation Clip's
+    # LoadVideo can reference it directly (see integrations/motion_context.py) --
+    # no download-then-reupload round trip through Django.
+    if not job.keep_comfyui_output:
+        comfyui.delete_output_file(output)
     comfyui.clear_history(job.comfyui_prompt_id)
 
 
@@ -519,10 +545,16 @@ def _execute_job(job: GenerationJob) -> None:
         else:
             _mark_job_failed(job, str(exc))
 
-    # job.status is always DONE by this point either way (see this
-    # function's own docstring) -- error_message set/blank distinguishes
+    # job.status is always DONE (or CANCELLED) by this point either way (see
+    # this function's own docstring) -- error_message set/blank distinguishes
     # success/failure for the hook, same as everywhere else that checks it.
     hooks.run_hook("POST_RENDER_HOOK", job=job, success=not job.error_message)
+
+    # Fire-and-forget for any app that wants to react to a job finishing
+    # (currently: director's clip-chain auto-advance, see
+    # director/signals.py) without generation needing to know about it --
+    # see generation/signals.py's own docstring.
+    job_finished.send(sender=GenerationJob, job=job)
 
 
 def recover_orphaned_processing_jobs() -> None:

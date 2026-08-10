@@ -251,6 +251,37 @@ class GenerationJob(models.Model):
         null=True, blank=True, help_text="Total sampler steps for this job -- only set during Phase.RENDERING."
     )
 
+    keep_comfyui_output = models.BooleanField(
+        default=False,
+        help_text="Skip tasks.py's usual delete_output_file() cleanup after downloading this "
+        "job's result, leaving it in place on the ComfyUI machine. Set by director/services.py "
+        "when creating a Clip's job, so a following continuation Clip's LoadVideo node can "
+        "reference this job's output directly instead of Django downloading and re-uploading "
+        "it (see integrations/motion_context.py). Unused outside Director Mode.",
+    )
+    comfyui_output_filename = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="The rendered output's filename/subfolder on ComfyUI's own machine (see "
+        "integrations/comfyui.py's ComfyUIOutput) -- distinct from video_file's own randomized "
+        "storage name. Recorded for every job regardless of mode; only actually read back when "
+        "keep_comfyui_output left the file in place for a following continuation Clip to "
+        "reference (see integrations/motion_context.py).",
+    )
+    comfyui_output_subfolder = models.CharField(max_length=255, blank=True, default="")
+    continuation_params = models.JSONField(
+        null=True,
+        blank=True,
+        default=None,
+        help_text="When set, build_api_workflow() splices in motion/audio continuity via "
+        "integrations/motion_context.py::apply_motion_context(workflow, mode=job.mode, "
+        "**continuation_params) -- see that function for the expected keys. Set by "
+        "director/services.py; unused outside Director Mode. Mirrors use_spectrum's shape "
+        "(a job-level flag/data driving an optional workflow splice) rather than introducing "
+        "a separate extensibility mechanism.",
+    )
+
     cancel_requested = models.BooleanField(
         default=False,
         help_text="Set by generation/api.py's cancel_job() on a PROCESSING job (the request that "
