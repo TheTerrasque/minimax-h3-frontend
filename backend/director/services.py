@@ -11,6 +11,7 @@ from django.core.files.base import ContentFile
 from django_q.tasks import async_task
 
 from generation.models import GenerationJob, ReferenceAsset
+from integrations import media_post, motion_context
 
 from .models import Clip, Project
 
@@ -53,21 +54,49 @@ def _build_job_for_clip(clip: Clip) -> GenerationJob:
     it as the Clip's current_job, and enqueues it. Assumes the caller
     (render_clip()) has already confirmed this Clip is actually ready to
     render (if continues_previous, its predecessor must be clean).
+
+    Graceful fallback when the Contex-Loop extension isn't installed --
+    or wasn't installed yet when the *predecessor* rendered, so its
+    ComfyUI-side output was never kept around to reference -- see
+    extras.md#contex-loop's "Graceful fallback" section: instead of true
+    motion/audio continuity, feeds the previous clip's last frame in as an
+    ordinary image reference. Self-healing: as soon as both a clip and its
+    predecessor have real checkpoints, later renders automatically switch
+    back to full continuity without any user action.
     """
-    continuation_params = None
+    available = motion_context.is_available()
+    continuation_params: dict | None = None
+    hack_last_frame: bytes | None = None
+
     if clip.continues_previous:
         predecessor = _predecessor(clip)
         if predecessor is None or predecessor.needs_render or predecessor.current_job_id is None:
             raise RenderConflict(f"Clip {clip.id}'s predecessor isn't rendered yet.")
         pred_job = predecessor.current_job
-        continuation_params = {
-            "source_filename": pred_job.comfyui_output_filename,
-            "source_subfolder": pred_job.comfyui_output_subfolder,
-            "load_prefix": predecessor.checkpoint_filename_prefix,
-            "load_index": predecessor.checkpoint_clip_index,
-            "save_prefix": _checkpoint_prefix(clip.project_id),
-            "save_index": clip.id,
-        }
+
+        if available and pred_job.keep_comfyui_output:
+            continuation_params = {
+                "source_filename": pred_job.comfyui_output_filename,
+                "source_subfolder": pred_job.comfyui_output_subfolder,
+                "save_prefix": _checkpoint_prefix(clip.project_id),
+                "save_index": clip.id,
+            }
+            if predecessor.checkpoint_filename_prefix:
+                continuation_params["load_prefix"] = predecessor.checkpoint_filename_prefix
+                continuation_params["load_index"] = predecessor.checkpoint_clip_index
+        else:
+            pred_job.video_file.open("rb")
+            try:
+                video_bytes = pred_job.video_file.read()
+            finally:
+                pred_job.video_file.close()
+            hack_last_frame = media_post.extract_last_frame(video_bytes)
+    elif available:
+        # Not itself a continuation, but save a checkpoint (nothing else --
+        # see apply_motion_context()'s docstring on why a fresh scene can't
+        # run the rest of the splice) in case a *later* clip continues from
+        # this one.
+        continuation_params = {"save_prefix": _checkpoint_prefix(clip.project_id), "save_index": clip.id}
 
     job = GenerationJob.objects.create(
         user=clip.project.user,
@@ -83,15 +112,29 @@ def _build_job_for_clip(clip: Clip) -> GenerationJob:
         height=clip.height,
         duration_seconds=clip.duration.duration_seconds,
         estimated_seconds=clip.duration.estimated_render_seconds,
-        # Always kept, not just when continues_previous -- a later-added
-        # Clip might turn out to continue *this* one, and this job has no
-        # way to know that in advance; a stray undeleted ComfyUI-side file
-        # is cheap compared to losing the ability to chain from it. See
-        # GenerationJob.keep_comfyui_output's own docstring.
-        keep_comfyui_output=True,
+        # Only worth keeping when the extension is actually available --
+        # the fallback above reads Django's own already-downloaded
+        # video_file instead of ComfyUI's copy, so there's no reason to
+        # leave a stray file on the ComfyUI machine when it is unavailable.
+        keep_comfyui_output=available,
         continuation_params=continuation_params,
     )
-    for ref in clip.references.all():
+
+    references = list(clip.references.all())
+    if hack_last_frame is not None:
+        # Leads as the new job's first (order=0) image reference -- i2v's
+        # convention is order=0 -> first_frame; r2v's is order=0 -> the
+        # first <Picture N> token. Either way it's the strongest reference
+        # slot, matching the fallback's intent (start this clip from
+        # exactly where the previous one ended). Any image references
+        # already on the clip itself shift down to make room.
+        for ref in references:
+            if ref.kind == ReferenceAsset.Kind.IMAGE:
+                ref.order += 1
+        hack_ref = ReferenceAsset(job=job, kind=ReferenceAsset.Kind.IMAGE, order=0)
+        hack_ref.file.save("continuation_last_frame.png", ContentFile(hack_last_frame), save=True)
+
+    for ref in references:
         ref.file.open("rb")
         try:
             content = ref.file.read()
@@ -101,8 +144,14 @@ def _build_job_for_clip(clip: Clip) -> GenerationJob:
         new_ref.file.save(ref.file.name.rsplit("/", 1)[-1], ContentFile(content), save=True)
 
     clip.current_job = job
-    clip.checkpoint_filename_prefix = _checkpoint_prefix(clip.project_id)
-    clip.checkpoint_clip_index = clip.id
+    if available:
+        clip.checkpoint_filename_prefix = _checkpoint_prefix(clip.project_id)
+        clip.checkpoint_clip_index = clip.id
+    else:
+        # No real checkpoint was saved -- don't leave a stale pointer a
+        # future continuation clip might trust.
+        clip.checkpoint_filename_prefix = ""
+        clip.checkpoint_clip_index = None
     clip.save(update_fields=["current_job", "checkpoint_filename_prefix", "checkpoint_clip_index"])
 
     # Same shared FIFO queue processor generation/api.py's own job creation

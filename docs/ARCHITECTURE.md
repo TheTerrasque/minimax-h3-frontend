@@ -1434,18 +1434,17 @@ Intentionally not built in this pass:
   is plain component state in `App.tsx`'s `MainLayout`, not synced to the
   URL (no `?job=<id>`); a deliberate simplification, easy to add later if
   bookmarking/sharing a specific job's view turns out to matter.
-- **Clip-chaining extras (e.g. ComfyUI-H3-Motion-Context)** — see
-  `extras.md`'s Motion Context section for the full write-up. Unlike
-  Spectrum (the one extra actually wired in, a per-job workflow-graph
-  patch), chaining clips together is a stateful, multi-job feature: it
-  needs the previous job's *latent* to survive past render completion
-  (today's `tasks.py::_finish_job_from_history` deletes ComfyUI's copy of
-  the output right after download, and only final video/image/audio bytes
-  are ever persisted — never a latent), plus a "continue from job X"
-  concept in both the data model (`GenerationJob` has no notion of a parent
-  job) and the UI (no "continue this render" action in job history). Worth
-  designing properly if/when it's actually wanted, not bolted on as another
-  boolean.
+- ~~Clip-chaining extras~~ — designed properly rather than bolted on, per
+  the note that used to be here: see **Director Mode** below, a new
+  `director` app (`Project`/`Clip`, dirty-cascade re-render,
+  `integrations/motion_context.py`'s continuity splice, with a graceful
+  last-frame fallback when that extension isn't installed — see
+  `extras.md#contex-loop`). Backend (data model, render orchestration,
+  REST API) is built and structurally verified; the LLM script-to-clips
+  planning endpoint, final assembly/export, and the frontend board UI are
+  still in progress — this bullet stays here until all of that lands, at
+  which point it should move into this doc's main body instead of
+  Deferred.
 - **A general "extras" plugin registry** — the current `COMFYUI_EXTRAS`
   mechanism (`config/settings.py`) is deliberately a single purpose-built
   boolean (`GenerationJob.use_spectrum`) plus one splice function

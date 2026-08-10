@@ -31,7 +31,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
-from integrations import comfyui, llm
+from integrations import comfyui, llm, motion_context
 
 from .models import (
     CONTENT_TYPE_BY_MODE,
@@ -90,6 +90,13 @@ class ConfigResponseSerializer(serializers.Serializer):
         help_text="settings.SPECTRUM_LEVEL: null (not offered), 0 (optional, default off), "
         "1 (optional, default on), or 2 (forced -- every job uses it, no toggle to show). "
         "See extras.md#spectrum.",
+    )
+    director_full_continuity_available = serializers.BooleanField(
+        help_text="Whether the Contex-Loop extension (see extras.md#contex-loop) is actually "
+        "installed on the configured ComfyUI instance right now. Director Mode itself is never "
+        "disabled by this being False -- continuation clips still render, just via a simpler "
+        "last-frame-reference fallback instead of true motion/audio continuity; the frontend "
+        "should show a note to that effect rather than hiding the continues_previous toggle.",
     )
 
 
@@ -364,6 +371,7 @@ def config(request):
             "aspect_ratios": [{"value": value, "label": label} for value, label in ASPECT_RATIOS],
             "default_aspect_ratio": DEFAULT_ASPECT_RATIO,
             "spectrum_level": settings.SPECTRUM_LEVEL,
+            "director_full_continuity_available": motion_context.is_available(),
         }
     )
 

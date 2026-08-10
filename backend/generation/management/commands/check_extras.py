@@ -5,6 +5,13 @@ touch the render path at all -- purely a "did I actually install the custom
 node yet" sanity check to run after flipping COMFYUI_EXTRAS on and before
 queuing a real job with it.
 
+Also unconditionally checks Director Mode's continuity extension (see
+extras.md#contex-loop) -- unlike the extras above, that one isn't gated by
+COMFYUI_EXTRAS/EXTRAS_CONFIG at all (there's no per-job toggle to show; a
+continues_previous clip just uses it automatically when available and
+falls back to a simpler technique when not, see director/services.py), so
+it's checked every run regardless of COMFYUI_EXTRAS.
+
 Usage:
     uv run manage.py check_extras
 """
@@ -14,7 +21,7 @@ from __future__ import annotations
 from django.conf import settings
 from django.core.management.base import BaseCommand
 
-from integrations import comfyui, spectrum
+from integrations import comfyui, motion_context, spectrum
 
 # One entry per extra this app actually knows how to wire in -- see
 # extras.md's "why only one extra is wired up right now" for why this isn't
@@ -36,10 +43,6 @@ class Command(BaseCommand):
     help = __doc__
 
     def handle(self, *args, **options):
-        if not settings.EXTRAS_CONFIG:
-            self.stdout.write("No extras configured (COMFYUI_EXTRAS is empty).")
-            return
-
         if not comfyui.is_alive():
             self.stdout.write(
                 self.style.ERROR(
@@ -47,6 +50,31 @@ class Command(BaseCommand):
                     "can't check node availability."
                 )
             )
+            return
+
+        if motion_context.is_available():
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"director continuity (always attempted, not part of COMFYUI_EXTRAS): "
+                    f"detected -- {motion_context.MOTION_CONTEXT_NODE_CLASS} found."
+                )
+            )
+        else:
+            self.stdout.write(
+                self.style.WARNING(
+                    "director continuity (always attempted, not part of COMFYUI_EXTRAS): "
+                    f"NOT detected -- missing ComfyUI node {motion_context.MOTION_CONTEXT_NODE_CLASS}. "
+                    "Continuation clips will use the last-frame fallback instead -- see "
+                    "extras.md#contex-loop. NOTE: as of this writing this is expected even with "
+                    "ComfyUI-MiniMaxH3-Contex-Loop actually installed -- that extension doesn't "
+                    "register this class as a usable node at all (see extras.md#contex-loop's "
+                    "'Verified against a real install' section); check for MiniMaxH3LoopTrim "
+                    "instead to confirm the *package* is installed."
+                )
+            )
+
+        if not settings.EXTRAS_CONFIG:
+            self.stdout.write("No COMFYUI_EXTRAS configured.")
             return
 
         for slug, level in settings.EXTRAS_CONFIG.items():

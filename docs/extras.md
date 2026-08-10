@@ -16,10 +16,13 @@ and, for Spectrum, an independent
 [comfyui-wiki.com news post](https://comfyui-wiki.com/en/news/2026-08-03-comfyui-spectrum-minimax-h3))
 but has not audited any of their code.
 
-Right now only **Spectrum** is actually wired into this app (see
-[Configuration](#configuration) below); Turbo and Motion Context are
-documented for reference but not integrated — see [Why only one extra is
-wired up right now](#why-only-one-extra-is-wired-up-right-now).
+**Spectrum** and **Contex Loop** (the latter backing Director Mode's clip
+continuation, not a `COMFYUI_EXTRAS` toggle — see
+[below](#contex-loop--integrated-director-mode)) are actually wired into
+this app; Turbo and the older, separate Motion Context project are
+documented for reference but not integrated — see [Why only one
+COMFYUI_EXTRAS extra is wired up right
+now](#why-only-one-comfyui_extras-extra-is-wired-up-right-now).
 
 ## Configuration
 
@@ -156,6 +159,154 @@ equivalence CI), plus a community report confirming revision
 `dc6291525112cb4246f864738e5bb4e2b85446da` on Windows 11 / ROCm 7.2.1 /
 ComfyUI 0.30.0 — none of that was independently re-verified here.
 
+## Contex Loop — integrated (Director Mode)
+
+**[ethanfel/ComfyUI-MiniMaxH3-Contex-Loop](https://github.com/ethanfel/ComfyUI-MiniMaxH3-Contex-Loop)**
+— chains MiniMax H3 clips together so motion and audio continue across the
+join, the same problem the older, separate
+[Motion Context](#motion-context--documented-not-integrated) project below
+addresses, from a different author. Backs **Director Mode**'s clip
+continuation (`Clip.continues_previous`, see `ARCHITECTURE.md`) — unlike
+every other extra on this page, it isn't a `COMFYUI_EXTRAS`/`EXTRAS_CONFIG`
+toggle: there's no per-job checkbox, it's attempted automatically whenever
+a Director clip is flagged as continuing the one before it, with a
+graceful fallback when it isn't installed (see below).
+
+### What it does
+
+The full extension is actually two layers:
+
+- Its own **Plan → Loop Start → ... → Review Gate → Loop End → Assemble**
+  node pipeline (`chain_nodes.py`), which runs a whole multi-scene chain as
+  *one* ComfyUI graph submission and includes an interactive human-in-the-
+  loop Review Gate (approve/retry/reroll) needing a live browser session
+  against ComfyUI itself. **Not used by this app** — it would fight
+  Director Mode's own job queue, UI, and per-clip regeneration/review
+  model.
+- Four lower-level nodes (`nodes.py`) this app's `integrations/
+  motion_context.py` *attempts* to use directly, the same way
+  `integrations/spectrum.py` splices Spectrum into a template (find
+  node(s), rewire references, insert): **MiniMaxH3MotionContext** (pins
+  the previous clip's frames/audio as conditioning), **MiniMaxH3LoopTrim**
+  (removes the duplicated leading frames/audio the context node causes),
+  and a **MiniMaxH3MotionContextSaveLatent** / **LoadLatent** pair
+  (persists the previous clip's AV latent to a safetensors file on
+  ComfyUI's own disk). **See "Verified against a real install" below —
+  three of these four are not actually usable this way.**
+
+### Verified against a real install
+
+Installed and checked live against this deployment's ComfyUI
+(`GET /object_info/<class_type>` for each): only **MiniMaxH3LoopTrim** is
+actually registered as a usable ComfyUI node. `MiniMaxH3MotionContext`,
+`MiniMaxH3MotionContextSaveLatent`, and `MiniMaxH3MotionContextLoadLatent`
+all return `{}` (ComfyUI's "not installed" signal) — they exist as plain
+Python classes in the extension's `nodes.py` source, but its `__init__.py`
+never registers them in `NODE_CLASS_MAPPINGS`, so they aren't reachable as
+standalone splice targets at all. The extension's actual public API for
+this capability is the higher-level `chain_nodes.py` pipeline instead —
+confirmed registered: `MiniMaxH3ChainPlan`, `MiniMaxH3ChainScenePromptEditor`,
+`MiniMaxH3ChainLoopStart`, `MiniMaxH3ChainCurrent`, `MiniMaxH3ChainContext`,
+`MiniMaxH3ChainSegmentSave`, `MiniMaxH3ChainReview`, `MiniMaxH3ChainLoopEnd`.
+
+**Practical effect**: `apply_motion_context()`'s full-continuity branch can
+never succeed as written — ComfyUI's `/prompt` validation rejects the
+unregistered node types every time (the same graceful "job.error_message,
+not a crash" failure `apply_spectrum()`'s own docstring describes for a
+renamed node). This isn't silently broken, though: `is_available()` checks
+for that same unregistered `MiniMaxH3MotionContext` class, so it correctly
+reports unavailable and the [graceful fallback](#graceful-fallback) below
+always engages instead — verified with a real two-clip render (t2v scene
+start → i2v `continues_previous` clip): the second clip's job carried the
+first clip's last frame as its `first_frame` reference, exactly as
+designed, with `keep_comfyui_output=False` and no `continuation_params`
+attempted.
+
+**Genuine full continuity needs a rewrite against `chain_nodes.py`'s real
+API** — a materially bigger integration than the current node-splice
+approach, not yet done:
+
+- `MiniMaxH3ChainLoopStart(plan, start_clip, scene_range)` does support
+  rendering exactly one scene per submission (`scene_range="3"` limits it
+  to scene 3 alone, no `MiniMaxH3ChainLoopEnd`/recursion required) — so a
+  one-job-per-clip model, matching this app's existing queue, is possible
+  in principle.
+- But every submission — even a single scene — needs a full `H3_CHAIN_PLAN`
+  (from `MiniMaxH3ChainPlan`'s `plan_json`: `prompt_prefix`/`defaults`/a
+  `shots` array), and `start_clip > 1` "loads and validates the preceding
+  segment checkpoint" against that same plan (audio hash/fingerprint
+  checks per `H3_CHAIN_FORMAT_GUIDE.md`) — a much more rigid, plan-
+  validated cross-job bookkeeping contract than this app's current
+  freeform `filename_prefix`+`clip_index` scheme.
+- `MiniMaxH3ChainContext` takes an opaque `H3_CHAIN_STATE` (from Loop
+  Start/Current), not a plain `context_frames`/`context_audio` pair — the
+  video-loading/checkpoint-loading logic is encapsulated inside that state
+  object, not directly wireable the way this app's current
+  `video_ref.add_load_video_node()` approach assumes.
+- `MiniMaxH3ChainSegmentSave` does its own H.264 encoding + checkpoint
+  save together (not a bare latent save) — would likely replace this
+  app's own `CreateVideo`/`SaveVideo` handling for a continuation clip,
+  not just add alongside it.
+
+Tracked as follow-up work, not attempted in this pass — see
+`ARCHITECTURE.md`'s Deferred section.
+
+### Install (in ComfyUI)
+
+```sh
+cd ComfyUI/custom_nodes
+git clone https://github.com/ethanfel/ComfyUI-MiniMaxH3-Contex-Loop.git
+```
+
+Restart ComfyUI and hard-refresh the browser if you ever use its own UI.
+Optional ffmpeg on PATH (falls back to PyAV) — irrelevant to this app's own
+usage, which never touches that extension's own Plan/Assemble nodes.
+
+### How this app wires it in (today — see caveat above)
+
+- `integrations/motion_context.py::apply_motion_context()` would splice
+  the nodes above into a Director clip's workflow at render time
+  (`generation/tasks.py::build_api_workflow()`'s `continuation_params`
+  kwarg, set by `director/services.py::_build_job_for_clip()`) *if* those
+  nodes were reachable. The intended design: every Director-rendered clip
+  gets at least a SaveLatent node (so a *later* clip has a checkpoint to
+  continue from if it turns out to want one); a clip with
+  `continues_previous=True` additionally gets the full MotionContext/
+  LoopTrim splice, fed from the *previous* clip's own rendered video,
+  referenced **directly on ComfyUI's own machine** (via `LoadVideo`'s
+  `"name [output]"` folder-paths annotation, see `integrations/video_ref.py`)
+  rather than downloaded and re-uploaded through Django.
+  `GenerationJob.keep_comfyui_output`/`comfyui_output_filename`/
+  `_subfolder` exist to support this. None of it currently activates in
+  practice — see above.
+
+### Graceful fallback
+
+Director Mode never requires this extension to be installed — it's
+detected live (`integrations/motion_context.py::is_available()`, a cached
+`GET /object_info/MiniMaxH3MotionContext` check, also surfaced to the
+frontend via `GET /api/config/`'s `director_full_continuity_available`)
+and degrades automatically rather than failing or disabling continuation:
+
+- **Not installed at all**, or **the previous clip was rendered before it
+  was installed** (so its ComfyUI-side output was never kept around to
+  reference): a `continues_previous` clip falls back to feeding the
+  previous clip's **last frame** in as an ordinary image reference (i2v's
+  `first_frame`, or r2v's first `<Picture N>`) instead of true motion/audio
+  continuity — a much weaker technique (no audio carries over, and motion
+  restarts from a single still frame rather than flowing continuously) but
+  still a real visual anchor, and it needs nothing beyond what this app
+  already keeps (the rendered `video_file` every job downloads regardless
+  — see `integrations/media_post.py::extract_last_frame()`).
+- **Self-healing**: this is re-checked on every render, not just once —
+  install the extension mid-project and the *next* clip you render
+  (continuation or not) automatically starts using full continuity again,
+  no re-render of earlier clips required.
+- Director Mode itself is never disabled by the extension being absent —
+  every other capability (multi-clip sequencing, dirty-cascade re-render,
+  shared project prompt/resources) works identically either way; only the
+  quality of a `continues_previous` join degrades.
+
 ## Turbo — documented, not integrated
 
 **[Larryvrh/ComfyUI-MiniMax-H3-Turbo](https://github.com/Larryvrh/ComfyUI-MiniMax-H3-Turbo)**
@@ -225,7 +376,11 @@ preset/duration model doesn't have a clean per-job override for yet.
 **[NikoDemon80/ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context)**
 — chains MiniMax H3 clips together so motion **and audio** continue across
 the join, instead of each clip re-deciding content from a single still
-frame.
+frame. The same underlying problem
+[Contex Loop](#contex-loop--integrated-director-mode) above (a different,
+later project) solves and which this app actually integrates — this one
+remains just documented for reference, not integrated; no reason to run
+both.
 
 ### What it does
 
@@ -280,21 +435,17 @@ wrong.
 
 Unlike Spectrum and Turbo, this isn't a per-job workflow patch at all — it's
 a **stateful, multi-job feature**: "continue this specific previous clip."
-This app doesn't currently support that shape of feature:
+This app didn't originally support that shape of feature at all (no
+"continue from job X" concept anywhere in the data model — `GenerationJob`
+had no notion of a parent job — or UI); that gap is what Director Mode was
+designed to fill (see `ARCHITECTURE.md`), using
+[Contex Loop](#contex-loop--integrated-director-mode) above rather than
+this project. Nothing rules out wiring this one in too later if Contex
+Loop ever turns out to have a dealbreaker Motion Context doesn't, but
+there's no reason to maintain two integrations of the same underlying
+capability today.
 
-- ComfyUI's own copy of a finished render is deleted right after download
-  today (`generation/tasks.py::_finish_job_from_history` →
-  `comfyui.delete_output_file`), and nothing persists a job's *latent* at
-  all — only its final video/image/audio bytes. Motion Context's Save/Load
-  Latent nodes need that latent to survive between two separate job runs.
-- There's no "continue from job X" concept anywhere in the data model
-  (`GenerationJob` has no notion of a parent job) or UI (job history has no
-  "continue this render" action).
-
-This is a real feature to design properly later, not an "extra" to bolt on
-— see `ARCHITECTURE.md`'s Deferred section.
-
-## Why only one extra is wired up right now
+## Why only one COMFYUI_EXTRAS extra is wired up right now
 
 This project went through a few design passes on how much "extras"
 infrastructure to build up front — preset-level configuration (rejected: it

@@ -57,6 +57,23 @@ def extract_audio(video_bytes: bytes) -> bytes:
     return _run_ffmpeg(["-vn", "-acodec", "libmp3lame", "-q:a", "2"], video_bytes, ".mp3")
 
 
+def extract_last_frame(video_bytes: bytes) -> bytes:
+    """Extracts the final frame as a PNG -- backs Director Mode's
+    last-frame-as-reference fallback for continuation clips when the real
+    motion-context extension isn't installed (see integrations/
+    motion_context.py::is_available(), director/services.py, extras.md
+    #contex-loop's "Graceful fallback" section).
+
+    Uses the `reverse` filter (decode the whole clip, play it backwards,
+    take frame 0) rather than a `-sseof` time-based seek: this project's
+    clips are short (a few seconds -- see RenderDuration), so decoding the
+    whole thing is cheap and, unlike seeking from end-of-file by a fixed
+    duration, is exact regardless of clip length and can't land before the
+    start of a clip shorter than the seek offset.
+    """
+    return _run_ffmpeg(["-vf", "reverse", "-frames:v", "1", "-update", "1"], video_bytes, ".png")
+
+
 def extract_thumbnail(video_bytes: bytes, max_width: int = 320) -> bytes:
     """Extracts frame 0, downscaled to max_width wide, as a PNG -- backs
     GenerationJob.thumbnail_file (see generation/tasks.py's
