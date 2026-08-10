@@ -483,16 +483,14 @@ ones I invite"):
   `ReferenceAsset` rows in one atomic multipart request (`reference_images`
   — repeatable file field, order matters: i2v's first/second become
   first/last frame, r2v's up to 9 become `<Picture N>` tokens; `reference_audio`
-  — r2v only, up to 3, each becoming an `<Audio N>` token), then
+  and `reference_video` — r2v only, up to 3 each, becoming `<Audio N>`/
+  `<Video N>` tokens), then
   enqueues `generation.tasks.process_queue` via Django-Q2 (no job id — it's
   a shared queue processor, see `tasks.py` above; safe to enqueue
   redundantly on every job creation) — there's no separate staging step,
   since reference files are already staged client-side before submission
   (the same pattern `reference_labels` on `/api/prompt/refine/` assumes).
-  Video references are rejected with a 400 rather than silently accepted,
-  since `tasks.py` doesn't wire `ref_video_N`/`ref_video_audio_N` into the
-  workflow yet (audio references *are* wired now — see "Getting the
-  workflows working" below). Every job response (list, detail, and the
+  Every job response (list, detail, and the
   create response itself) includes `raw_prompt` (lifted to the base
   serializer, not detail-only, so the frontend's queue sidebar can show a
   title without a second request per job) and `expected_finish_time` (via
@@ -961,10 +959,11 @@ example wiring), and — r2v only — reference audio (same pattern, dynamically
 adding `LoadAudio` nodes per audio `ReferenceAsset`, wired into
 `ref_audios.ref_audio_N`; confirmed against live `/object_info/LoadAudio`
 and `/object_info/MiniMaxH3ReferenceToVideo` before implementing, see
-"Verification" below). **Not yet wired**: r2v's `ref_video_N`/
-`ref_video_audio_N` (needs `LoadVideo` plus frame-extraction, a different
-shape than the direct upload→node mapping `ref_image_N`/`ref_audio_N` use —
-see `resources/COMFYUI_API_GUIDE.md` §4); i2v's first/last-frame assignment
+"Verification" below) and reference video (`ref_videos.ref_video_N` +
+`ref_video_audios.ref_video_audio_N`, both fed from the same uploaded clip
+via `integrations/video_ref.py`'s `LoadVideo`→`GetVideoComponents` splice —
+confirmed against live `/object_info/LoadVideo`/`/object_info/GetVideoComponents`,
+see `resources/COMFYUI_API_GUIDE.md` §4). i2v's first/last-frame assignment
 currently uses a plain convention (reference `order=0` → first frame,
 `order=1` → last frame) since `ReferenceAsset` has no explicit role field
 yet.
@@ -1418,12 +1417,6 @@ Intentionally not built in this pass:
   against real ComfyUI), but the actual resolution/duration sweep this
   command exists for hasn't — still deliberately not run without asking
   first, since larger combinations can crash the ComfyUI process.
-- **r2v's `ref_video_N`/`ref_video_audio_N`** — `ref_image_N` and (as of
-  this pass) `ref_audio_N` are both wired, in `tasks.py` and the frontend;
-  `ref_video_N`/`ref_video_audio_N` still aren't — those need frame-
-  extraction from an uploaded video first, a different shape than the
-  direct upload→node mapping the other two use; see "Getting the workflows
-  working" above.
 - **i2v's first/last-frame role** — inferred from `ReferenceAsset.order`
   (0 = first, 1 = last) rather than an explicit field; fine for now since
   the frontend already presents this as two distinct slots ("First frame" /

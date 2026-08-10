@@ -76,6 +76,7 @@ export interface CreateJobInput {
   improvedPrompt?: string;
   referenceImages?: File[];
   referenceAudio?: File[];
+  referenceVideo?: File[];
   /** If chat was used to draft this prompt, its full transcript -- only
    * ever persisted (as PromptChatSession/PromptChatMessage) as part of
    * this same job-creation call; the live chat itself never touches the
@@ -101,6 +102,7 @@ export function useCreateJob() {
       if (input.improvedPrompt) form.set("improved_prompt", input.improvedPrompt);
       for (const file of input.referenceImages ?? []) form.append("reference_images", file);
       for (const file of input.referenceAudio ?? []) form.append("reference_audio", file);
+      for (const file of input.referenceVideo ?? []) form.append("reference_video", file);
       if (input.chatTranscript?.length) {
         form.set("chat_transcript", JSON.stringify(input.chatTranscript));
       }

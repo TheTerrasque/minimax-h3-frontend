@@ -52,7 +52,7 @@ from django.core.files.base import ContentFile
 from django.db import transaction
 from django.utils import timezone
 
-from integrations import comfyui, hooks, media_post, spectrum
+from integrations import comfyui, hooks, media_post, spectrum, video_ref
 
 from .models import CONTENT_TYPE_BY_MODE, REFERENCE_FLOW_MODES, ContentType, GenerationJob, Mode, ReferenceAsset
 
@@ -95,6 +95,7 @@ _R2V_NODES = {
 }
 _R2V_MAX_REF_IMAGES = 9  # per live /object_info: ref_images autogrow max
 _R2V_MAX_REF_AUDIO = 3  # per live /object_info: ref_audios autogrow max (prefix "ref_audio_")
+_R2V_MAX_REF_VIDEO = 3  # per live /object_info: ref_videos/ref_video_audios autogrow max
 
 # The node ComfyUI actually reports step-by-step `progress` events for --
 # NOT _T2V_I2V_NODES/_R2V_NODES's "sampler" entry above. That "sampler" key
@@ -166,12 +167,13 @@ def build_api_workflow(
     last_frame_upload: str | None = None,
     ref_image_uploads: list[str] | None = None,
     ref_audio_uploads: list[str] | None = None,
+    ref_video_uploads: list[str] | None = None,
     use_spectrum: bool = False,
 ) -> dict[str, Any]:
     """Loads the mode's API-format template and patches in the given values.
 
     Takes already-uploaded ComfyUI input filenames (via
-    integrations.comfyui.upload_media) for any reference images/audio --
+    integrations.comfyui.upload_media) for any reference images/audio/video --
     doesn't upload anything itself, so it has no DB/network dependency beyond
     reading the template file.
 
@@ -223,11 +225,23 @@ def build_api_workflow(
             node_id = _add_load_audio_node(workflow, uploaded)
             sampler[f"ref_audios.ref_audio_{i}"] = [node_id, 0]
 
-        # TODO: ref_videos.ref_video_N / ref_video_audios.ref_video_audio_N --
-        # needs LoadVideo + frame-extraction wiring (see
-        # resources/COMFYUI_API_GUIDE.md #4's open question on ref_video_N's
-        # exact expected upstream shape); not yet implemented. ref_audio_N
-        # above is done.
+        # ref_videos.ref_video_N / ref_video_audios.ref_video_audio_N -- each
+        # uploaded video is split by video_ref.add_load_video_node() into a
+        # LoadVideo->GetVideoComponents pair; its "images"/"audio" outputs
+        # (index 0/1) feed the two same-numbered ref_ slots (see
+        # resources/COMFYUI_API_GUIDE.md #4 and integrations/video_ref.py).
+        for key in [k for k in sampler if k.startswith("ref_videos.ref_video_")]:
+            del sampler[key]
+        for key in [k for k in sampler if k.startswith("ref_video_audios.ref_video_audio_")]:
+            del sampler[key]
+        for node_id in [
+            nid for nid, n in workflow.items() if n["class_type"] in ("LoadVideo", "GetVideoComponents")
+        ]:
+            del workflow[node_id]
+        for i, uploaded in enumerate((ref_video_uploads or [])[:_R2V_MAX_REF_VIDEO]):
+            components_id = video_ref.add_load_video_node(workflow, uploaded)
+            sampler[f"ref_videos.ref_video_{i}"] = [components_id, 0]
+            sampler[f"ref_video_audios.ref_video_audio_{i}"] = [components_id, 1]
     else:
         sampler["prompt"] = prompt_text
         if first_frame_upload:
@@ -256,7 +270,7 @@ def _build_workflow_for_job(job: GenerationJob) -> dict[str, Any]:
     prompt_text = job.improved_prompt or job.raw_prompt
 
     first_frame_upload = last_frame_upload = None
-    ref_image_uploads = ref_audio_uploads = None
+    ref_image_uploads = ref_audio_uploads = ref_video_uploads = None
 
     if job.mode == Mode.IMAGE_TO_VIDEO:
         # Convention: the first (order=0) image reference is the first
@@ -281,6 +295,12 @@ def _build_workflow_for_job(job: GenerationJob) -> dict[str, Any]:
             ]
         )
         ref_audio_uploads = [_upload_reference(ref) for ref in audio]
+        videos = list(
+            job.references.filter(kind=ReferenceAsset.Kind.VIDEO).order_by("order", "id")[
+                :_R2V_MAX_REF_VIDEO
+            ]
+        )
+        ref_video_uploads = [_upload_reference(ref) for ref in videos]
 
     return build_api_workflow(
         job.mode,
@@ -293,6 +313,7 @@ def _build_workflow_for_job(job: GenerationJob) -> dict[str, Any]:
         last_frame_upload=last_frame_upload,
         ref_image_uploads=ref_image_uploads,
         ref_audio_uploads=ref_audio_uploads,
+        ref_video_uploads=ref_video_uploads,
         use_spectrum=job.use_spectrum,
     )
 

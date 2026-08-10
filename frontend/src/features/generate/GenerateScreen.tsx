@@ -64,6 +64,18 @@ const MAX_REFERENCE_AUDIO: Record<Mode, number> = {
   t2a: 0,
   r2a: 3,
 };
+// Mirrors MAX_REFERENCE_AUDIO -- a reference video's audio track rides along
+// with the same upload (see backend's _MAX_REFERENCE_VIDEO), so it isn't
+// tracked as a separate limit.
+const MAX_REFERENCE_VIDEO: Record<Mode, number> = {
+  t2v: 0,
+  i2v: 0,
+  r2v: 3,
+  t2i: 0,
+  r2i: 0,
+  t2a: 0,
+  r2a: 3,
+};
 
 function formatDuration(seconds: number): string {
   if (seconds < 60) return `${Math.round(seconds)}s`;
@@ -263,6 +275,7 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
   const [lastFrameKey, setLastFrameKey] = useState(0);
   const [refImages, setRefImages] = useState<File[]>([]);
   const [referenceAudio, setReferenceAudio] = useState<File[]>([]);
+  const [referenceVideo, setReferenceVideo] = useState<File[]>([]);
   // The first frame's own aspect ratio, offered (and auto-selected) as an
   // extra option in the aspect-ratio picker -- see computeImageAspectRatio.
   const [matchedAspectRatio, setMatchedAspectRatio] = useState<MatchedAspectRatio | null>(null);
@@ -312,6 +325,7 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
     setLastFrame(null);
     setRefImages([]);
     setReferenceAudio([]);
+    setReferenceVideo([]);
     setChatOpen(false);
     setChatMessages([]);
   }, [mode]);
@@ -336,8 +350,10 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
     (async () => {
       const images = redoJob.references.filter((r) => r.kind === "image").filter(hasUrl);
       const audioRefs = redoJob.references.filter((r) => r.kind === "audio").filter(hasUrl);
+      const videoRefs = redoJob.references.filter((r) => r.kind === "video").filter(hasUrl);
       images.sort((a, b) => a.order - b.order);
       audioRefs.sort((a, b) => a.order - b.order);
+      videoRefs.sort((a, b) => a.order - b.order);
 
       try {
         if (redoJob.mode === "i2v") {
@@ -350,13 +366,15 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
           setFirstFrame(firstFile);
           setLastFrame(lastFile);
         } else if (REFERENCE_FLOW_MODES.includes(redoJob.mode)) {
-          const [imageFiles, audioFiles] = await Promise.all([
+          const [imageFiles, audioFiles, videoFiles] = await Promise.all([
             Promise.all(images.map(fetchAsFile)),
             Promise.all(audioRefs.map(fetchAsFile)),
+            Promise.all(videoRefs.map(fetchAsFile)),
           ]);
           if (activeRedoIdRef.current !== redoId) return; // superseded by a newer redo
           setRefImages(imageFiles);
           setReferenceAudio(audioFiles);
+          setReferenceVideo(videoFiles);
         }
       } catch (err) {
         // Best-effort: if a reference can't be re-fetched for some reason,
@@ -481,8 +499,10 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
     const imageLabels = referenceImages.map((_, i) => `Picture ${i + 1}`);
     const audioLabels =
       MAX_REFERENCE_AUDIO[mode] > 0 ? referenceAudio.map((_, i) => `Audio ${i + 1}`) : [];
-    return [...imageLabels, ...audioLabels];
-  }, [referenceImages, referenceAudio, mode]);
+    const videoLabels =
+      MAX_REFERENCE_VIDEO[mode] > 0 ? referenceVideo.map((_, i) => `Video ${i + 1}`) : [];
+    return [...imageLabels, ...audioLabels, ...videoLabels];
+  }, [referenceImages, referenceAudio, referenceVideo, mode]);
 
   const firstFrameUrl = useObjectUrl(firstFrame);
   const lastFrameUrl = useObjectUrl(lastFrame);
@@ -549,6 +569,10 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
     setReferenceAudio((prev) => prev.filter((_, i) => i !== index));
   }
 
+  function handleRemoveRefVideo(index: number) {
+    setReferenceVideo((prev) => prev.filter((_, i) => i !== index));
+  }
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     if (!durationId || !aspectRatio || !rawPrompt.trim()) return;
@@ -563,6 +587,7 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
       improvedPrompt: improvedPrompt || undefined,
       referenceImages,
       referenceAudio: MAX_REFERENCE_AUDIO[mode] > 0 ? referenceAudio : undefined,
+      referenceVideo: MAX_REFERENCE_VIDEO[mode] > 0 ? referenceVideo : undefined,
       chatTranscript: chatMessages.length ? chatMessages : undefined,
       useSpectrum:
         config.data?.spectrum_level == null
@@ -577,12 +602,14 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
     setLastFrame(null);
     setRefImages([]);
     setReferenceAudio([]);
+    setReferenceVideo([]);
     setChatOpen(false);
     setChatMessages([]);
   }
 
   const maxImages = MAX_REFERENCE_IMAGES[mode];
   const maxAudio = MAX_REFERENCE_AUDIO[mode];
+  const maxVideo = MAX_REFERENCE_VIDEO[mode];
   const canSubmit =
     Boolean(durationId) && Boolean(aspectRatio) && rawPrompt.trim().length > 0 && !createJob.isPending;
   const selectedDuration = durations.find((d) => d.id === durationId) ?? null;
@@ -846,6 +873,55 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
                       onChange={(e) => {
                         const file = e.target.files?.[0];
                         if (file) setReferenceAudio((prev) => [...prev, file]);
+                        e.target.value = "";
+                      }}
+                    />
+                  </DropZone>
+                )}
+              </fieldset>
+            )}
+
+            {maxVideo > 0 && (
+              <fieldset>
+                <legend>
+                  Reference videos ({referenceVideo.length}/{maxVideo})
+                </legend>
+                <p className="hint">
+                  Add video clips (click, drag &amp; drop, or paste), then insert their token into
+                  your prompt. Each is split into frames + its own audio track.
+                </p>
+                {referenceVideo.length > 0 && (
+                  <ul className="reference-list">
+                    {referenceVideo.map((file, i) => (
+                      <li key={i} className="reference-item">
+                        <span>
+                          Video {i + 1}: {file.name}
+                        </span>
+                        <button type="button" onClick={() => insertToken(`<Video ${i + 1}>`)}>
+                          Insert token
+                        </button>
+                        <button type="button" onClick={() => handleRemoveRefVideo(i)}>
+                          Remove
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {referenceVideo.length < maxVideo && (
+                  <DropZone
+                    accept="video/*"
+                    className="file-slot"
+                    onFiles={(files) =>
+                      setReferenceVideo((prev) => [...prev, ...files].slice(0, maxVideo))
+                    }
+                  >
+                    Add reference video
+                    <input
+                      type="file"
+                      accept="video/*"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) setReferenceVideo((prev) => [...prev, file]);
                         e.target.value = "";
                       }}
                     />

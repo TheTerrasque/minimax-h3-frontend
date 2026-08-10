@@ -32,8 +32,8 @@ entrypoint via Docker Compose.
   the sidebar, no refreshing
 - **Quality/resolution/length presets** — pick a tier (e.g.
   Draft/Standard/High) instead of tuning raw sampler settings
-- **Reference uploads** — click, drag-and-drop, or paste in images/audio to
-  guide a render
+- **Reference uploads** — click, drag-and-drop, or paste in images/audio/video
+  to guide a render
 - **Optional AI prompt help** — an "AI refine" button and a chat panel for
   drafting prompts, if you point it at an OpenAI-compatible LLM endpoint
 - **Invite-only accounts** — no open signup; log in via your own OIDC

@@ -162,13 +162,18 @@ counts per group are enforced by the node's own schema (not something you can ex
 re-check `/object_info/MiniMaxH3ReferenceToVideo` if a future ComfyUI/node-pack version might have
 changed them.
 
-To feed `ref_video_N` / `ref_audio_N` / `ref_video_audio_N`, use ComfyUI's core `LoadVideo` /
-`LoadAudio` nodes (outputting `VIDEO`/`AUDIO`) the same way `LoadImage` is used for `ref_image_N` —
-upload the file first (see §5), then set that node's filename widget to the uploaded name.
-`ref_audio_N` is wired this way in `generation/tasks.py` (`LoadAudio.inputs.audio`, confirmed
-against live `/object_info/LoadAudio`); `ref_video_N`/`ref_video_audio_N` are not yet — those need
-frame-extraction from the uploaded video first, a different shape than the direct upload→node
-mapping `ref_image_N`/`ref_audio_N` use.
+To feed `ref_audio_N`, use ComfyUI's core `LoadAudio` node (outputting `AUDIO`) the same way
+`LoadImage` is used for `ref_image_N` — upload the file first (see §5), then set that node's
+filename widget to the uploaded name. Wired this way in `generation/tasks.py`
+(`LoadAudio.inputs.audio`, confirmed against live `/object_info/LoadAudio`).
+
+`ref_video_N`/`ref_video_audio_N` need a different shape, since `ref_video_N` wants frames
+(`IMAGE`), not a raw video file: upload the video (§5), feed it through core `LoadVideo`
+(`file` widget → `VIDEO` output) into core `GetVideoComponents` (`video` in → `images`/`audio`/
+`fps`/`bit_depth` out, confirmed live against `/object_info/LoadVideo` and
+`/object_info/GetVideoComponents`), then wire that node's `images`/`audio` outputs into the
+same-numbered `ref_video_N`/`ref_video_audio_N`. Wired this way in `generation/tasks.py` via
+`integrations/video_ref.py::add_load_video_node()`.
 
 ## 5. Uploading media (images, audio, video) — all through one endpoint
 

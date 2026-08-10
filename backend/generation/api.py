@@ -222,13 +222,19 @@ class CreateJobRequestSerializer(serializers.Serializer):
         help_text=(
             "Image reference files, order matters: i2v takes 0-2 (first = first frame, "
             "second = last frame); r2v takes 0-9, each becoming a <Picture N> token. "
-            "t2v takes none. Video references aren't wired up yet."
+            "t2v takes none."
         ),
     )
     reference_audio = serializers.ListField(
         child=serializers.FileField(),
         required=False,
         help_text="Standalone reference audio clips, r2v only, 0-3, each becoming an <Audio N> token.",
+    )
+    reference_video = serializers.ListField(
+        child=serializers.FileField(),
+        required=False,
+        help_text="Reference video clips, r2v only, 0-3, each becoming a <Video N> token -- split "
+        "server-side into frames + its own audio track (see integrations/video_ref.py).",
     )
     chat_transcript = serializers.CharField(
         required=False, allow_blank=True,
@@ -549,6 +555,21 @@ _MAX_REFERENCE_AUDIO = {
     Mode.REFERENCE_TO_AUDIO: 3,
 }
 
+# Max reference videos -- same shape/reasoning as _MAX_REFERENCE_AUDIO above
+# (ref_videos/ref_video_audios: COMFY_AUTOGROW_V3, max 3, see
+# generation/tasks.py's build_api_workflow()); a reference video's audio
+# track is part of the same upload, so this mirrors _MAX_REFERENCE_AUDIO's
+# per-mode values exactly rather than being tracked independently.
+_MAX_REFERENCE_VIDEO = {
+    Mode.TEXT_TO_VIDEO: 0,
+    Mode.IMAGE_TO_VIDEO: 0,
+    Mode.REFERENCE_TO_VIDEO: 3,
+    Mode.TEXT_TO_IMAGE: 0,
+    Mode.REFERENCE_TO_IMAGE: 0,
+    Mode.TEXT_TO_AUDIO: 0,
+    Mode.REFERENCE_TO_AUDIO: 3,
+}
+
 
 def _serialize_preset(preset: RenderPreset) -> dict:
     return {
@@ -762,6 +783,14 @@ def jobs(request):
             status=400,
         )
 
+    reference_video = request.FILES.getlist("reference_video")
+    max_video = _MAX_REFERENCE_VIDEO[mode]
+    if len(reference_video) > max_video:
+        return Response(
+            {"error": f"{Mode(mode).label} supports at most {max_video} video reference(s)."},
+            status=400,
+        )
+
     chat_transcript_raw = request.data.get("chat_transcript")
     chat_transcript = None
     if chat_transcript_raw:
@@ -808,6 +837,10 @@ def jobs(request):
         for order, file in enumerate(reference_audio):
             ReferenceAsset.objects.create(
                 job=job, kind=ReferenceAsset.Kind.AUDIO, order=order, file=file
+            )
+        for order, file in enumerate(reference_video):
+            ReferenceAsset.objects.create(
+                job=job, kind=ReferenceAsset.Kind.VIDEO, order=order, file=file
             )
         if chat_transcript:
             # Only ever created here -- see chat_message()'s docstring: the
