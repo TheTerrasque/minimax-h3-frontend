@@ -27,5 +27,5 @@ class ProjectAdmin(admin.ModelAdmin):
 class ClipAdmin(admin.ModelAdmin):
     list_display = ("id", "project", "order", "mode", "continues_previous", "needs_render", "current_job")
     list_filter = ("mode", "continues_previous", "needs_render")
-    readonly_fields = ("created_at", "updated_at", "checkpoint_filename_prefix", "checkpoint_clip_index")
+    readonly_fields = ("created_at", "updated_at", "chain_run_name", "chain_scene_number")
     inlines = [ClipReferenceAssetInline]

@@ -259,7 +259,7 @@ def build_api_workflow(
     if continuation_params:
         # Director Mode only (see GenerationJob.continuation_params'
         # docstring) -- generation has no other knowledge of director.
-        workflow = motion_context.apply_motion_context(workflow, mode=mode, **continuation_params)
+        workflow = motion_context.apply_motion_context(workflow, **continuation_params)
 
     return workflow
 
@@ -399,21 +399,8 @@ def _finish_job_from_history(job: GenerationJob, history_record: dict[str, Any])
     filename, output_bytes = _postprocess_output(job, output, video_bytes)
 
     job.video_file.save(filename, ContentFile(output_bytes), save=False)
-    # Recorded regardless of mode/keep_comfyui_output -- see the field's own
-    # docstring in models.py.
-    job.comfyui_output_filename = output.filename
-    job.comfyui_output_subfolder = output.subfolder
 
-    update_fields = [
-        "video_file",
-        "comfyui_output_filename",
-        "comfyui_output_subfolder",
-        "status",
-        "finished_at",
-        "phase",
-        "progress_current",
-        "progress_total",
-    ]
+    update_fields = ["video_file", "status", "finished_at", "phase", "progress_current", "progress_total"]
     if CONTENT_TYPE_BY_MODE[job.mode] == ContentType.VIDEO:
         # Best-effort: a poster image is a nice-to-have for the queue list
         # (see QueueSidebar's QueueThumb), not the actual output -- video_file
@@ -435,12 +422,10 @@ def _finish_job_from_history(job: GenerationJob, history_record: dict[str, Any])
 
     # Don't leave a copy on the ComfyUI machine now that we have it, and
     # tidy the history entry -- see resources/COMFYUI_API_GUIDE.md #10.
-    # keep_comfyui_output is the one exception: a director-created Clip's
-    # job leaves its output in place so the *next* continuation Clip's
-    # LoadVideo can reference it directly (see integrations/motion_context.py) --
-    # no download-then-reupload round trip through Django.
-    if not job.keep_comfyui_output:
-        comfyui.delete_output_file(output)
+    # Director Mode's continuation doesn't need an exception here (unlike
+    # an earlier design) -- MiniMaxH3ChainSegmentSave persists its own
+    # checkpoint independently, see integrations/motion_context.py.
+    comfyui.delete_output_file(output)
     comfyui.clear_history(job.comfyui_prompt_id)
 
 

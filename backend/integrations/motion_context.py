@@ -1,108 +1,92 @@
-"""Splices motion/audio continuity (ethanfel/ComfyUI-MiniMaxH3-Contex-Loop,
-see extras.md#contex-loop) between two separately-submitted ComfyUI jobs --
-the low-level, non-interactive half of that extension only
-(MiniMaxH3MotionContext/LoopTrim/Save|LoadLatent), not its own
-Plan/Loop/Review-Gate pipeline, which runs a whole multi-scene chain as one
-ComfyUI graph submission and needs a live interactive browser session -- see
-the Director Mode plan's "Extension research" section for why that pipeline
-isn't used. This module drives the same job-at-a-time model as the rest of
-this codebase's queue, called from generation/tasks.py's build_api_workflow()
-exactly the way integrations/spectrum.py already splices Spectrum in -- see
-that module for the same "find node(s), rewire references, insert" pattern
-this follows.
+"""Splices real motion/audio continuity (ethanfel/ComfyUI-MiniMaxH3-Contex-Loop,
+see extras.md#contex-loop) into a Director clip's workflow, called from
+generation/tasks.py's build_api_workflow() the same way integrations/
+spectrum.py splices Spectrum in.
 
-Unlike spectrum.py, this needs no explicit per-mode node-id table: every
-node this touches (the mode's sampler-prep node, BasicGuider,
-SamplerCustomAdvanced, VAEDecode, VAEDecodeAudio) is unique-by-class_type in
-every shipped template (t2v/i2v/r2v), confirmed by inspecting
-resources/workflows_api/*.api.json directly -- so this discovers them the
-same generic way spectrum.py discovers its sole UNETLoader, rather than
-needing a hand-exported reference workflow to hardcode ids from.
+**Rewritten after live verification against a real install** -- an earlier
+version of this module was built against nodes.py's MiniMaxH3MotionContext/
+SaveLatent/LoadLatent classes, which turned out not to be registered as
+usable ComfyUI nodes at all (see extras.md#contex-loop's "Verified against
+a real install" section for that story). This version is built against the
+extension's actual public API instead: the `chain_nodes.py` pipeline
+(MiniMaxH3ChainPlan/LoopStart/Current/Context/SegmentSave), used one scene
+at a time per job -- confirmed live, twice: a cheap Plan/LoopStart/Current
+resolution-only submission (no GPU cost) to validate the plan_json/
+scene-resolution contract, then two real renders (scene 1, then scene 2
+resuming from scene 1's saved checkpoint) that both succeeded, with the
+extracted first/last frames at the join visually near-identical -- genuine
+continuity, not a guess.
 
-Node input/output schemas below (MiniMaxH3MotionContext/LoopTrim/
-Save|LoadLatent's exact INPUT_TYPES/RETURN_TYPES, and Save/LoadLatent's
-actual path-resolution logic) were read from that extension's nodes.py
-source. **KNOWN BROKEN as of this writing, confirmed against a real install**
-(see extras.md#contex-loop's "Verified against a real install" section for
-the full story): nodes.py defines MiniMaxH3MotionContext/
-MiniMaxH3MotionContextSaveLatent/MiniMaxH3MotionContextLoadLatent as plain
-Python classes, but the extension's __init__.py only registers
-MiniMaxH3LoopTrim in NODE_CLASS_MAPPINGS -- the other three are internal
-helpers only reachable through chain_nodes.py's own higher-level pipeline
-(MiniMaxH3ChainContext/MiniMaxH3ChainSegmentSave/etc., a different,
-larger integration effort -- see extras.md), not usable as standalone
-splice targets the way this module assumes. In practice this means
-apply_motion_context()'s full-context branch (source_filename given) can
-never succeed against a real install: ComfyUI's /prompt validation
-rejects MiniMaxH3MotionContext/SaveLatent/LoadLatent as unknown node
-types every time (the same graceful-failure spectrum.py's docstring
-describes) -- but is_available() below checks for exactly that same
-unregistered class, so it correctly always reports unavailable and
-director/services.py's fallback always engages instead. The graceful
-fallback is doing real work here, not the full-continuity splice; don't
-trust the latter until this module is rewritten against the actually-
-registered chain_nodes.py API.
+Unlike the old design, this needs no "keep the previous job's ComfyUI
+output around" mechanism at all: continuity is entirely mediated by
+MiniMaxH3ChainSegmentSave's own checkpoint files on ComfyUI's disk
+(addressed by `run_name` + scene number, validated internally against a
+`generation_fingerprint` and each scene's own prompt/settings hash) --
+Django never needs to reference a sibling job's raw output file. See
+director/services.py for how `run_name`/scene numbering is tracked per
+Clip and how the "shots" list (every scene from the start of the current
+continuation run up to this one) is built fresh from current Clip data on
+every render.
 
-Graceful fallback when the extension isn't installed (or, right now,
-always, per above): director/services.py checks is_available() before
-ever calling apply_motion_context() here, and uses a much simpler
-fallback instead (feeding the previous clip's last frame as an ordinary
-image reference -- no special nodes needed at all) -- see that module's
-_build_job_for_clip() and extras.md#contex-loop's "Graceful fallback"
-section for the full picture. This module has no fallback logic of its
-own; it's only ever called once the caller has already confirmed the
-(currently unreachable) real nodes exist.
+MiniMaxH3ChainLoopStart's `scene_range` set to a single scene number (e.g.
+"3") renders exactly that one scene and terminates normally -- no
+MiniMaxH3ChainLoopEnd (which would instead recursively render the rest of
+the chain inside one ComfyUI submission via GraphBuilder) or
+MiniMaxH3ChainReview (interactive, needs a live browser session) is wired
+at all, keeping this a plain one-job-per-clip submission like every other
+mode this app renders. This app's own SaveVideo/CreateVideo nodes are left
+completely untouched -- MiniMaxH3ChainSegmentSave runs alongside purely for
+its checkpoint side effect (confirmed live: it writes its own H.264
+segment under output/h3_chains/<run_name>/, but this app's existing
+download path never reads that file, only its own SaveVideo output).
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
-from . import comfyui, video_ref
+from . import comfyui
 
 _SAMPLER_PREP_CLASSES = ("MiniMaxH3ImageToVideo", "MiniMaxH3ReferenceToVideo")
 
-# class_type of the one node whose presence gates everything in this module
-# -- see is_available(). The other three (LoopTrim, Save/LoadLatent) are
-# part of the same extension and, per its own repo layout, always installed
-# together, so checking just this one is representative without four round
-# trips to ComfyUI.
-MOTION_CONTEXT_NODE_CLASS = "MiniMaxH3MotionContext"
+# Presence of this class is what actually gates everything in this module --
+# confirmed live to be part of every real install (unlike the old
+# MiniMaxH3MotionContext check, see this module's docstring).
+CHAIN_CORE_NODE_CLASS = "MiniMaxH3ChainLoopStart"
 
 _AVAILABILITY_CACHE_KEY = "director:motion_context_available"
 _AVAILABILITY_CACHE_SECONDS = 60
 
-# Tested-default context lengths per H3_CHAIN_FORMAT_GUIDE.md ("use 22 for
-# the tested balance of continuity and delivered footage"; audio likewise).
-DEFAULT_CONTEXT_LENGTH = 22
+# Passed as MiniMaxH3ChainPlan's generation_fingerprint -- per its own
+# tooltip ("change this tag whenever the model, VAE, global references,
+# CFG, scheduler, or other external generation settings change... enforced
+# when resuming checkpoints"), confirmed live to gate resume validation.
+# Bump this if this app's Director rendering path ever changes in a way
+# that would make an old run's saved checkpoints unsafe to resume from
+# (e.g. a different base model/VAE) -- resuming under an unchanged
+# fingerprint after such a change is exactly what this exists to prevent.
+GENERATION_FINGERPRINT = "director-v1"
+
+DEFAULT_CONTEXT_LENGTH = 22  # H3_CHAIN_FORMAT_GUIDE.md's tested default.
 DEFAULT_AUDIO_CONTEXT_LENGTH = 22
+DEFAULT_SEGMENT_CRF = 28  # Checkpoint segment quality -- these aren't the delivered output, so bias toward smaller files over SegmentSave's own default(18).
 
 
 def is_available() -> bool:
-    """Whether MOTION_CONTEXT_NODE_CLASS is actually installed on the
-    configured ComfyUI instance right now -- same live /object_info check
-    check_extras.py already does for Spectrum, but called from the render
-    path itself (not just a manual diagnostic), so it's cached briefly
-    rather than hitting ComfyUI on every clip render/edit. A short TTL
-    means installing the extension takes effect within a minute, not a
-    process restart.
-
-    Per this module's own docstring: MOTION_CONTEXT_NODE_CLASS is never
-    actually registered by a real install of the extension (confirmed live
-    -- only MiniMaxH3LoopTrim and the chain_nodes.py pipeline are), so this
-    currently always returns False in practice regardless of whether the
-    extension itself is installed. Kept as-is (rather than hardcoded to
-    False) so this starts working automatically the moment either a future
-    extension release registers that class directly, or this module gets
-    rewritten against chain_nodes.py's actual API and this constant is
-    repointed at one of *those* class names instead.
+    """Whether the Contex-Loop extension is actually installed on the
+    configured ComfyUI instance right now -- a cached live /object_info
+    check, same shape as check_extras.py's manual diagnostic for Spectrum
+    but called from the render path itself. Short TTL means installing the
+    extension takes effect within a minute, not a process restart.
     """
     from django.core.cache import cache
 
     cached = cache.get(_AVAILABILITY_CACHE_KEY)
     if cached is not None:
         return cached
-    available = comfyui.get_object_info(MOTION_CONTEXT_NODE_CLASS) is not None
+    available = comfyui.get_object_info(CHAIN_CORE_NODE_CLASS) is not None
     cache.set(_AVAILABILITY_CACHE_KEY, available, timeout=_AVAILABILITY_CACHE_SECONDS)
     return available
 
@@ -120,154 +104,183 @@ def _find_one(workflow: dict[str, Any], class_types: tuple[str, ...]) -> str:
 
 def _rewire(workflow: dict[str, Any], old_ref: list, new_ref: list) -> None:
     """Redirects every input across `workflow` currently pointing at
-    old_ref (a [node_id, output_index] pair) to new_ref instead -- same
-    generic reference-rewrite spectrum.py's apply_spectrum() does for its
-    single UNETLoader rewire, generalized to an arbitrary [id, index] pair
-    since motion-context touches more than one output socket."""
+    old_ref (a [node_id, output_index] pair) to new_ref instead -- see
+    integrations/spectrum.py's apply_spectrum() for the same pattern."""
     for node in workflow.values():
         for key, value in node.get("inputs", {}).items():
             if isinstance(value, list) and len(value) == 2 and value == old_ref:
                 node["inputs"][key] = list(new_ref)
 
 
+def base_seed_for_run(run_name: str) -> int:
+    """Deterministic per-run base seed, derived from `run_name` so every
+    separate job submission for the same continuation run resolves
+    identical per-scene seeds. MiniMaxH3ChainPlan hashes each scene's own
+    derived seed into its checkpoint-compatibility validation (confirmed
+    live -- the dumped plan state includes a per-shot "seed" field feeding
+    a plan_hash) -- a caller that generated a fresh random base_seed on
+    every submission would make every resume after the first fail
+    validation. Exposed (not just internal) so director/services.py can
+    keep using the *same* run_name -> base_seed mapping without duplicating
+    the hash logic.
+    """
+    digest = hashlib.sha256(run_name.encode("utf-8")).hexdigest()
+    return int(digest[:15], 16)  # comfortably within the node's UINT64-ish INT range
+
+
 def apply_motion_context(
     workflow: dict[str, Any],
     *,
-    mode: str,
-    save_prefix: str,
-    save_index: int,
-    source_filename: str | None = None,
-    source_subfolder: str = "",
-    load_prefix: str | None = None,
-    load_index: int | None = None,
+    shots: list[dict[str, str]],
+    prompt_prefix: str,
+    run_name: str,
+    scene_number: int,
+    width: int,
+    height: int,
+    default_duration_seconds: float,
+    default_steps: int,
     context_length: int = DEFAULT_CONTEXT_LENGTH,
     audio_context_length: int = DEFAULT_AUDIO_CONTEXT_LENGTH,
+    audio_mode: str = "generated_audio",
+    segment_crf: int = DEFAULT_SEGMENT_CRF,
 ) -> dict[str, Any]:
     """Mutates and returns `workflow` (an already-loaded/patched mode
-    template, see generation/tasks.py::build_api_workflow).
+    template, see generation/tasks.py::build_api_workflow) with this
+    scene's chain-driven prompt/length/seed/steps and real continuity.
 
-    `save_prefix`/`save_index` are always given -- every director-rendered
-    clip saves its own checkpoint (a plain MiniMaxH3MotionContextSaveLatent
-    tapping the sampler's own raw output, nothing else) whenever the
-    extension is available, *regardless* of whether this clip itself
-    continues another one, purely so a *later* clip has something to
-    continue *from* if it turns out to want to (see director/models.py's
-    Clip.checkpoint_filename_prefix/_clip_index -- set unconditionally at
-    job-creation time in director/services.py).
-
-    `source_filename`/`source_subfolder` (the previous clip's own rendered
-    video, still sitting on ComfyUI's machine -- see GenerationJob.
-    keep_comfyui_output/comfyui_output_filename) are only given when this
-    clip actually continues a predecessor. When given, splices the full
-    MiniMaxH3MotionContext -> ... -> MiniMaxH3LoopTrim chain in too (fed
-    through LoadVideo/GetVideoComponents via video_ref.add_load_video_node(),
-    using ComfyUI's own folder_paths "name [output]" annotation convention
-    to point at output/ instead of re-uploading into input/). When omitted
-    (a fresh scene, or the first clip of a chain), only the SaveLatent node
-    is added -- MiniMaxH3MotionContext's own context_frames input is
-    required (not optional) per its schema, so there's no way to run it at
-    all without a real source video, and no need to: a clip that isn't
-    continuing anything has nothing else for it to do anyway.
-
-    `load_prefix`/`load_index` are the *previous* clip's own saved
-    checkpoint (None if it was rendered before the extension was installed,
-    in which case MiniMaxH3MotionContext runs without context_latent -- see
-    its schema, that input is optional -- continuity still comes from
-    context_frames/context_audio alone).
+    `shots` is every scene from the start of the current continuation run
+    up to and including this one, in order -- `[{"id": ..., "prompt": ...},
+    ...]`, `len(shots) == scene_number` (director/services.py builds this
+    fresh from current Clip data every render, walking back through
+    `continues_previous` predecessors). `run_name` must be identical across
+    every submission for the same run (it addresses the checkpoint files
+    on ComfyUI's disk); `scene_number` (1-based) is this clip's position
+    within it -- 1 means a fresh run (nothing to resume), >1 means "load
+    and validate the preceding scene's checkpoint," both handled entirely
+    by MiniMaxH3ChainLoopStart itself, not anything this function does
+    directly.
     """
+    sampler_id = _find_one(workflow, _SAMPLER_PREP_CLASSES)
+    random_noise_id = _find_one(workflow, ("RandomNoise",))
+    scheduler_id = _find_one(workflow, ("BasicScheduler",))
+    vae_decode_id = _find_one(workflow, ("VAEDecode",))
+    vae_decode_audio_id = _find_one(workflow, ("VAEDecodeAudio",))
     sampler_advanced_id = _find_one(workflow, ("SamplerCustomAdvanced",))
 
-    if source_filename is not None:
-        sampler_id = _find_one(workflow, _SAMPLER_PREP_CLASSES)
-        # Not otherwise referenced -- _rewire() below finds BasicGuider's
-        # conditioning input generically, this call is purely the same
-        # exactly-one structural assertion _find_one() makes for every
-        # other node type here (fails loudly if a future template changes
-        # shape).
-        _find_one(workflow, ("BasicGuider",))
-        vae_decode_id = _find_one(workflow, ("VAEDecode",))
-        vae_decode_audio_id = _find_one(workflow, ("VAEDecodeAudio",))
+    # Reuse whichever VAE loaders the template already wired up.
+    video_vae_ref = workflow[sampler_id]["inputs"]["vae"]
+    audio_vae_ref = workflow[vae_decode_audio_id]["inputs"]["vae"]
 
-        # Reuse whichever VAE loaders the template already wired up, rather
-        # than adding duplicates -- the sampler-prep node's own "vae" input
-        # is the video VAE; VAEDecodeAudio's "vae" input is the audio VAE.
-        video_vae_ref = workflow[sampler_id]["inputs"]["vae"]
-        audio_vae_ref = workflow[vae_decode_audio_id]["inputs"]["vae"]
-
-        source_path = f"{source_subfolder}/{source_filename}" if source_subfolder else source_filename
-        components_id = video_ref.add_load_video_node(workflow, f"{source_path} [output]")
-
-        load_latent_ref: list | None = None
-        if load_prefix is not None:
-            load_latent_id = _next_node_id(workflow)
-            workflow[load_latent_id] = {
-                "class_type": "MiniMaxH3MotionContextLoadLatent",
-                "inputs": {"latent_path": load_prefix, "clip_index": load_index},
-                "_meta": {"title": "MiniMaxH3MotionContextLoadLatent"},
-            }
-            load_latent_ref = [load_latent_id, 0]
-
-        # Reserve both new node ids and do every rewrite *before* inserting
-        # either node's own dict -- otherwise a rewrite that redirects
-        # references to, say, [sampler_id, 0] would also catch the new
-        # context node's own "conditioning": [sampler_id, 0] input (added
-        # below) and rewrite it to point at itself. Same reasoning as the
-        # trim node further down. Mirrors spectrum.py's apply_spectrum(),
-        # which reserves its one new node's id before rewiring for the same
-        # reason.
-        context_id = _next_node_id(workflow)
-        _rewire(workflow, [sampler_id, 0], [context_id, 0])
-
-        context_inputs: dict[str, Any] = {
-            "conditioning": [sampler_id, 0],
-            "latent": [sampler_id, 1],
-            "vae": video_vae_ref,
-            "context_frames": [components_id, 0],
+    plan_id = _next_node_id(workflow)
+    workflow[plan_id] = {
+        "class_type": "MiniMaxH3ChainPlan",
+        "inputs": {
+            "plan_json": json.dumps({"prompt_prefix": prompt_prefix, "shots": shots}),
+            "run_name": run_name,
+            "generation_fingerprint": GENERATION_FINGERPRINT,
+            "width": width,
+            "height": height,
             "context_length": context_length,
             "encode_mode": "video",
             "anchor_mode": "head",
             "crop": "disabled",
+            "audio_mode": audio_mode,
             "audio_context_length": audio_context_length,
-            "audio_mode": "timeline",
-            "audio_vae": audio_vae_ref,
-            "context_audio": [components_id, 1],
-        }
-        if load_latent_ref is not None:
-            context_inputs["context_latent"] = load_latent_ref
-        workflow[context_id] = {
-            "class_type": "MiniMaxH3MotionContext",
-            "inputs": context_inputs,
-            "_meta": {"title": "MiniMaxH3MotionContext"},
-        }
-
-        trim_id = _next_node_id(workflow)
-        # Everything that consumed the raw decode output (CreateVideo, in
-        # every shipped template) now consumes the trimmed one instead --
-        # reserved/rewired before insertion, same reasoning as context_id
-        # above.
-        _rewire(workflow, [vae_decode_id, 0], [trim_id, 0])
-        _rewire(workflow, [vae_decode_audio_id, 0], [trim_id, 1])
-        workflow[trim_id] = {
-            "class_type": "MiniMaxH3LoopTrim",
-            "inputs": {
-                "images": [vae_decode_id, 0],
-                "trim_frames": [context_id, 1],
-                "audio": [vae_decode_audio_id, 0],
-                "fps": 24.0,
-                "match_tail": True,
-            },
-            "_meta": {"title": "MiniMaxH3LoopTrim"},
-        }
-
-    save_id = _next_node_id(workflow)
-    workflow[save_id] = {
-        "class_type": "MiniMaxH3MotionContextSaveLatent",
-        "inputs": {
-            "latent": [sampler_advanced_id, 0],
-            "filename_prefix": save_prefix,
-            "clip_index": save_index,
+            "default_duration_seconds": default_duration_seconds,
+            "default_steps": default_steps,
+            "base_seed": base_seed_for_run(run_name),
+            "segment_crf": segment_crf,
         },
-        "_meta": {"title": "MiniMaxH3MotionContextSaveLatent"},
+        "_meta": {"title": "MiniMaxH3ChainPlan"},
+    }
+
+    loop_start_id = _next_node_id(workflow)
+    workflow[loop_start_id] = {
+        "class_type": "MiniMaxH3ChainLoopStart",
+        "inputs": {"plan": [plan_id, 0], "start_clip": scene_number, "scene_range": str(scene_number)},
+        "_meta": {"title": "MiniMaxH3ChainLoopStart"},
+    }
+
+    current_id = _next_node_id(workflow)
+    workflow[current_id] = {
+        "class_type": "MiniMaxH3ChainCurrent",
+        "inputs": {"state": [loop_start_id, 1]},
+        "_meta": {"title": "MiniMaxH3ChainCurrent"},
+    }
+
+    # Redirect the sampler-prep node's prompt/width/height/length, the
+    # sampler's own seed, and the scheduler's step count to Current's
+    # resolved values (output indices per MiniMaxH3ChainCurrent's schema:
+    # 4=prompt, 5=noise_seed, 6=length, 7=steps, 8=width, 9=height) instead
+    # of whatever build_api_workflow() already set from this job's own raw
+    # fields -- Current computes the shared-prompt + scene-prompt
+    # concatenation, the H3-valid frame count (including any continuation
+    # overlap), and a run-consistent seed/step count from the plan, which
+    # must be what's actually used for this to be a real continuation.
+    sampler_inputs = workflow[sampler_id]["inputs"]
+    prompt_ref = sampler_inputs.get("prompt")
+    if isinstance(prompt_ref, list):
+        # r2v's prompt is a separate PrimitiveStringMultiline node linked
+        # into the sampler (see tasks.py's _R2V_NODES), not a literal on
+        # the sampler itself -- redirect that node's value instead.
+        workflow[prompt_ref[0]]["inputs"]["value"] = [current_id, 4]
+    else:
+        sampler_inputs["prompt"] = [current_id, 4]
+    sampler_inputs["width"] = [current_id, 8]
+    sampler_inputs["height"] = [current_id, 9]
+    sampler_inputs["length"] = [current_id, 6]
+    workflow[random_noise_id]["inputs"]["noise_seed"] = [current_id, 5]
+    workflow[scheduler_id]["inputs"]["steps"] = [current_id, 7]
+
+    # Reserve+rewire before inserting the node's own dict -- otherwise
+    # rewiring every reference to [sampler_id, 0] would also catch this
+    # node's own "conditioning": [sampler_id, 0] input, added below, and
+    # redirect it to point at itself. Same reasoning as spectrum.py's
+    # apply_spectrum(), which reserves its one new node's id before
+    # rewiring for the same reason.
+    context_id = _next_node_id(workflow)
+    _rewire(workflow, [sampler_id, 0], [context_id, 0])
+    workflow[context_id] = {
+        "class_type": "MiniMaxH3ChainContext",
+        "inputs": {
+            "state": [current_id, 0],
+            "conditioning": [sampler_id, 0],
+            "vae": video_vae_ref,
+            "latent": [sampler_id, 1],
+            "audio_vae": audio_vae_ref,
+        },
+        "_meta": {"title": "MiniMaxH3ChainContext"},
+    }
+
+    trim_id = _next_node_id(workflow)
+    _rewire(workflow, [vae_decode_id, 0], [trim_id, 0])
+    _rewire(workflow, [vae_decode_audio_id, 0], [trim_id, 1])
+    workflow[trim_id] = {
+        "class_type": "MiniMaxH3LoopTrim",
+        "inputs": {
+            "images": [vae_decode_id, 0],
+            "trim_frames": [context_id, 1],
+            "audio": [vae_decode_audio_id, 0],
+            "fps": 24.0,
+            "match_tail": True,
+        },
+        "_meta": {"title": "MiniMaxH3LoopTrim"},
+    }
+
+    # Output node -- no downstream rewiring needed. This app's own
+    # SaveVideo/CreateVideo (unmodified, still fed from trim_id's outputs
+    # via the _rewire calls above) remains the actual download source;
+    # this exists purely for its checkpoint side effect.
+    segment_save_id = _next_node_id(workflow)
+    workflow[segment_save_id] = {
+        "class_type": "MiniMaxH3ChainSegmentSave",
+        "inputs": {
+            "state": [current_id, 0],
+            "images": [trim_id, 0],
+            "sampled_latent": [sampler_advanced_id, 0],
+            "audio": [trim_id, 1],
+        },
+        "_meta": {"title": "MiniMaxH3ChainSegmentSave"},
     }
 
     return workflow

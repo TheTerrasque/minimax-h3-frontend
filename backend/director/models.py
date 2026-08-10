@@ -161,17 +161,27 @@ class Clip(models.Model):
     current_job = models.ForeignKey(
         GenerationJob, on_delete=models.SET_NULL, null=True, blank=True, related_name="director_clip"
     )
-    checkpoint_filename_prefix = models.CharField(
+    chain_run_name = models.CharField(
         max_length=200,
         blank=True,
         default="",
-        help_text="Set once this Clip successfully renders -- the filename_prefix passed to "
-        "MiniMaxH3MotionContextSaveLatent, consumed by the *next* continuation Clip's "
-        "MiniMaxH3MotionContextLoadLatent. Lives entirely as ComfyUI-side state (a "
-        "safetensors file on its own disk) -- this is just the string needed to find it "
-        "again, never any latent bytes.",
+        help_text="Set once this Clip successfully renders with real continuity (extension "
+        "available) -- the MiniMaxH3ChainPlan run_name its checkpoint was saved under (see "
+        "integrations/motion_context.py). Blank if this Clip has never rendered, or last "
+        "rendered via the last-frame fallback (extension unavailable) -- see "
+        "director/services.py's _resolve_chain_params(). A *continuation* Clip only inherits "
+        "real continuity from its predecessor when the predecessor has this set; otherwise it "
+        "falls back too, and stays on the fallback until a fresh (non-continuation) Clip "
+        "starts a new run. Shared by every Clip in the same contiguous run -- lives entirely "
+        "as ComfyUI-side state (a run of checkpoint files on its own disk); this is just the "
+        "string needed to find them again, never any latent bytes.",
     )
-    checkpoint_clip_index = models.PositiveIntegerField(null=True, blank=True)
+    chain_scene_number = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="This Clip's 1-based position within chain_run_name's run (matches "
+        "MiniMaxH3ChainLoopStart's start_clip/scene_range) -- 1 for a fresh run.",
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

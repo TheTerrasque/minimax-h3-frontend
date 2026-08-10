@@ -56,20 +56,17 @@ class Command(BaseCommand):
             self.stdout.write(
                 self.style.SUCCESS(
                     f"director continuity (always attempted, not part of COMFYUI_EXTRAS): "
-                    f"detected -- {motion_context.MOTION_CONTEXT_NODE_CLASS} found."
+                    f"detected -- {motion_context.CHAIN_CORE_NODE_CLASS} found. Continuation clips "
+                    "get real motion/audio continuity via the Chain pipeline -- see extras.md#contex-loop."
                 )
             )
         else:
             self.stdout.write(
                 self.style.WARNING(
                     "director continuity (always attempted, not part of COMFYUI_EXTRAS): "
-                    f"NOT detected -- missing ComfyUI node {motion_context.MOTION_CONTEXT_NODE_CLASS}. "
+                    f"NOT detected -- missing ComfyUI node {motion_context.CHAIN_CORE_NODE_CLASS}. "
                     "Continuation clips will use the last-frame fallback instead -- see "
-                    "extras.md#contex-loop. NOTE: as of this writing this is expected even with "
-                    "ComfyUI-MiniMaxH3-Contex-Loop actually installed -- that extension doesn't "
-                    "register this class as a usable node at all (see extras.md#contex-loop's "
-                    "'Verified against a real install' section); check for MiniMaxH3LoopTrim "
-                    "instead to confirm the *package* is installed."
+                    "extras.md#contex-loop's 'Graceful fallback' section."
                 )
             )
 

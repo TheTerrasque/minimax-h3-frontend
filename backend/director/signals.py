@@ -51,8 +51,23 @@ def on_job_finished(sender, job, **kwargs) -> None:
     succeeded = job.status == GenerationJob.Status.DONE and not job.error_message
     if succeeded:
         clip.needs_render = False
-        clip.save(update_fields=["needs_render"])
+        # Only trust chain_run_name/chain_scene_number once the job that
+        # was actually supposed to produce that checkpoint has confirmed
+        # succeeded -- see services._build_job_for_clip()'s comment on the
+        # real bug this replaced (setting these eagerly at job-creation
+        # time let a later Clip "resume" from a checkpoint a failed job
+        # never actually saved).
+        if job.continuation_params:
+            clip.chain_run_name = job.continuation_params.get("run_name", "")
+            clip.chain_scene_number = job.continuation_params.get("scene_number")
+        else:
+            clip.chain_run_name = ""
+            clip.chain_scene_number = None
+        clip.save(update_fields=["needs_render", "chain_run_name", "chain_scene_number"])
         _advance_chain(clip)
-    # Failure or cancellation: leave needs_render=True so it's still shown
-    # dirty/re-renderable; either way the chain (if any) stops at this Clip.
+    # Failure or cancellation: leave needs_render=True (and chain_run_name/
+    # chain_scene_number untouched -- needs_render=True already keeps any
+    # future continuation Clip from trusting this one, see
+    # _resolve_chain_params()) so it's still shown dirty/re-renderable;
+    # either way the chain (if any) stops at this Clip.
     Clip.objects.filter(pk=clip.pk).update(render_chain_target=None)

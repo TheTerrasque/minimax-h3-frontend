@@ -170,86 +170,128 @@ continuation (`Clip.continues_previous`, see `ARCHITECTURE.md`) — unlike
 every other extra on this page, it isn't a `COMFYUI_EXTRAS`/`EXTRAS_CONFIG`
 toggle: there's no per-job checkbox, it's attempted automatically whenever
 a Director clip is flagged as continuing the one before it, with a
-graceful fallback when it isn't installed (see below).
+graceful fallback when it isn't installed (see below). **Working and
+verified against a real install**, including two real end-to-end renders
+where the extracted frames at the join were visually near-identical —
+genuine continuity, not a guess (see "Verified live" below).
 
 ### What it does
 
 The full extension is actually two layers:
 
 - Its own **Plan → Loop Start → ... → Review Gate → Loop End → Assemble**
-  node pipeline (`chain_nodes.py`), which runs a whole multi-scene chain as
-  *one* ComfyUI graph submission and includes an interactive human-in-the-
-  loop Review Gate (approve/retry/reroll) needing a live browser session
-  against ComfyUI itself. **Not used by this app** — it would fight
-  Director Mode's own job queue, UI, and per-clip regeneration/review
-  model.
-- Four lower-level nodes (`nodes.py`) this app's `integrations/
-  motion_context.py` *attempts* to use directly, the same way
-  `integrations/spectrum.py` splices Spectrum into a template (find
-  node(s), rewire references, insert): **MiniMaxH3MotionContext** (pins
-  the previous clip's frames/audio as conditioning), **MiniMaxH3LoopTrim**
-  (removes the duplicated leading frames/audio the context node causes),
-  and a **MiniMaxH3MotionContextSaveLatent** / **LoadLatent** pair
-  (persists the previous clip's AV latent to a safetensors file on
-  ComfyUI's own disk). **See "Verified against a real install" below —
-  three of these four are not actually usable this way.**
+  node pipeline (`chain_nodes.py`), which normally runs a whole multi-scene
+  chain as *one* ComfyUI graph submission (via `MiniMaxH3ChainLoopEnd`'s
+  GraphBuilder recursion) and can include an interactive human-in-the-loop
+  Review Gate (approve/retry/reroll) needing a live browser session against
+  ComfyUI itself. **This app uses only part of this pipeline** — see below.
+- An earlier version of this integration was built against four *different*,
+  lower-level classes in the extension's `nodes.py` source
+  (`MiniMaxH3MotionContext`/`LoopTrim`/`SaveLatent`/`LoadLatent`), modeled
+  as a plain node-splice the same way `integrations/spectrum.py` splices
+  Spectrum in. **That turned out to be wrong** — confirmed live
+  (`GET /object_info/<class_type>` against a real install): only
+  `MiniMaxH3LoopTrim` of those four is actually registered as a usable
+  node; the other three exist in source but are never added to
+  `NODE_CLASS_MAPPINGS`, so ComfyUI's `/prompt` validation rejected them
+  as unknown node types every time. Left as a cautionary note for anyone
+  reading this extension's source directly instead of its live
+  `/object_info` — a repo's example workflows and internal helper classes
+  aren't necessarily its current registered API.
 
-### Verified against a real install
+### How this app actually wires it in
 
-Installed and checked live against this deployment's ComfyUI
-(`GET /object_info/<class_type>` for each): only **MiniMaxH3LoopTrim** is
-actually registered as a usable ComfyUI node. `MiniMaxH3MotionContext`,
-`MiniMaxH3MotionContextSaveLatent`, and `MiniMaxH3MotionContextLoadLatent`
-all return `{}` (ComfyUI's "not installed" signal) — they exist as plain
-Python classes in the extension's `nodes.py` source, but its `__init__.py`
-never registers them in `NODE_CLASS_MAPPINGS`, so they aren't reachable as
-standalone splice targets at all. The extension's actual public API for
-this capability is the higher-level `chain_nodes.py` pipeline instead —
-confirmed registered: `MiniMaxH3ChainPlan`, `MiniMaxH3ChainScenePromptEditor`,
-`MiniMaxH3ChainLoopStart`, `MiniMaxH3ChainCurrent`, `MiniMaxH3ChainContext`,
-`MiniMaxH3ChainSegmentSave`, `MiniMaxH3ChainReview`, `MiniMaxH3ChainLoopEnd`.
+Uses the `chain_nodes.py` pipeline's non-interactive nodes directly, one
+scene per ComfyUI submission — matching this app's existing one-job-per-clip
+queue, *not* the extension's own whole-chain-in-one-graph model:
 
-**Practical effect**: `apply_motion_context()`'s full-continuity branch can
-never succeed as written — ComfyUI's `/prompt` validation rejects the
-unregistered node types every time (the same graceful "job.error_message,
-not a crash" failure `apply_spectrum()`'s own docstring describes for a
-renamed node). This isn't silently broken, though: `is_available()` checks
-for that same unregistered `MiniMaxH3MotionContext` class, so it correctly
-reports unavailable and the [graceful fallback](#graceful-fallback) below
-always engages instead — verified with a real two-clip render (t2v scene
-start → i2v `continues_previous` clip): the second clip's job carried the
-first clip's last frame as its `first_frame` reference, exactly as
-designed, with `keep_comfyui_output=False` and no `continuation_params`
-attempted.
+- **`MiniMaxH3ChainPlan`** — takes a `plan_json` (`{"prompt_prefix": ...,
+  "shots": [{"id", "prompt"}, ...]}`), a `run_name` (identifies the
+  checkpoint folder under ComfyUI's `output/h3_chains/`), a
+  `generation_fingerprint` (a constant this app sets,
+  `integrations/motion_context.py::GENERATION_FINGERPRINT` — bump it if
+  the underlying model/settings ever change incompatibly), and the shared
+  width/height/steps/duration/seed-base settings for the whole run.
+- **`MiniMaxH3ChainLoopStart(plan, start_clip=N, scene_range="N")`** —
+  `scene_range` limited to a single scene number renders exactly that one
+  scene and terminates normally; `MiniMaxH3ChainLoopEnd`
+  (recursion) and `MiniMaxH3ChainReview` (interactive) are never wired at
+  all. `start_clip > 1` loads and validates the preceding scene's saved
+  checkpoint — confirmed live, including the exact error when it's missing.
+- **`MiniMaxH3ChainCurrent(state)`** — its `prompt`/`noise_seed`/`length`/
+  `steps`/`width`/`height` outputs replace whatever `build_api_workflow()`
+  already set on the mode's own sampler-prep node (i2v/r2v) and
+  `RandomNoise`/`BasicScheduler` — the plan-resolved values (shared prompt
+  + this scene's prompt, the H3-valid frame count including any
+  continuation overlap, a run-consistent seed) are what must actually
+  drive the render, not this job's own raw fields.
+- **`MiniMaxH3ChainContext(state, conditioning, vae, latent, audio_vae)`**
+  — replaces the sampler-prep node's conditioning going into `BasicGuider`;
+  all context-loading logic (frames/audio/latent from the checkpoint) is
+  encapsulated inside `state`, not wired by hand.
+- **`MiniMaxH3LoopTrim`** — same as originally designed, removes the
+  duplicated leading frames/audio; this app's own `CreateVideo`/`SaveVideo`
+  nodes are fed from its trimmed output, completely unmodified from a
+  normal (non-Director) render.
+- **`MiniMaxH3ChainSegmentSave(state, images, sampled_latent, audio)`** —
+  persists the checkpoint. Runs purely for that side effect: it also
+  writes its own H.264 segment file, but this app never reads it, only its
+  own `SaveVideo` output (confirmed live — both nodes' outputs appeared
+  side by side in the same `/history` record, independently downloadable).
+  Every Director-rendered clip gets this (even a fresh, non-continuation
+  scene), so a *later* clip always has something to resume from if it
+  turns out to want to.
 
-**Genuine full continuity needs a rewrite against `chain_nodes.py`'s real
-API** — a materially bigger integration than the current node-splice
-approach, not yet done:
+See `director/services.py::_resolve_chain_params()` for how `run_name` and
+each scene's 1-based position (`Clip.chain_run_name`/`chain_scene_number`)
+are tracked and how the `shots` list (every scene from the start of the
+current continuation run up to the one being rendered, using each Clip's
+*current* prompt) is rebuilt fresh on every render — the plan is
+validated/hashed as a whole on each submission (confirmed live), not
+incrementally.
 
-- `MiniMaxH3ChainLoopStart(plan, start_clip, scene_range)` does support
-  rendering exactly one scene per submission (`scene_range="3"` limits it
-  to scene 3 alone, no `MiniMaxH3ChainLoopEnd`/recursion required) — so a
-  one-job-per-clip model, matching this app's existing queue, is possible
-  in principle.
-- But every submission — even a single scene — needs a full `H3_CHAIN_PLAN`
-  (from `MiniMaxH3ChainPlan`'s `plan_json`: `prompt_prefix`/`defaults`/a
-  `shots` array), and `start_clip > 1` "loads and validates the preceding
-  segment checkpoint" against that same plan (audio hash/fingerprint
-  checks per `H3_CHAIN_FORMAT_GUIDE.md`) — a much more rigid, plan-
-  validated cross-job bookkeeping contract than this app's current
-  freeform `filename_prefix`+`clip_index` scheme.
-- `MiniMaxH3ChainContext` takes an opaque `H3_CHAIN_STATE` (from Loop
-  Start/Current), not a plain `context_frames`/`context_audio` pair — the
-  video-loading/checkpoint-loading logic is encapsulated inside that state
-  object, not directly wireable the way this app's current
-  `video_ref.add_load_video_node()` approach assumes.
-- `MiniMaxH3ChainSegmentSave` does its own H.264 encoding + checkpoint
-  save together (not a bare latent save) — would likely replace this
-  app's own `CreateVideo`/`SaveVideo` handling for a continuation clip,
-  not just add alongside it.
+### Verified live
 
-Tracked as follow-up work, not attempted in this pass — see
-`ARCHITECTURE.md`'s Deferred section.
+Before writing any of the above into this app, the whole mechanism was
+tested directly against ComfyUI's HTTP API (bypassing Django entirely):
+
+1. A **free** (no GPU) `Plan → LoopStart → Current` resolution-only
+   submission confirmed the `plan_json` format, exact per-scene frame-count
+   math (raw vs. delivered frames, the `context_length` overlap), and
+   prompt concatenation, before spending any render time.
+2. A **real render** of scene 1 (low steps, 2s clip) succeeded, and
+   `MiniMaxH3ChainSegmentSave` wrote a real checkpoint;
+   this app's own `SaveVideo` output was independently downloadable, as
+   expected.
+3. Submitting scene 2 with `start_clip=2` **without** a checkpoint present
+   failed with an exact, informative `FileNotFoundError` naming the
+   missing metadata path — confirming resume validation is real, not a
+   no-op.
+4. A **real render** of scene 2, resuming from scene 1's checkpoint,
+   succeeded. Extracting scene 1's last frame and scene 2's first
+   delivered frame and viewing them side by side showed them **visually
+   near-identical** (same subject position, same background) — genuine
+   motion continuity, not a coincidence of similar prompts.
+5. The same sequence was then repeated end-to-end through the real
+   Director API (project → two clips → render → render, not raw ComfyUI
+   calls), confirming `run_name`/scene-number tracking, the `shots` list,
+   and the auto-advance signal all work together correctly. This pass is
+   also what caught two real bugs, both fixed before this was considered
+   done:
+   - `Clip.chain_run_name`/`chain_scene_number` were being set optimistically
+     at job-*creation* time rather than after actual success — a failed
+     render could leave a later clip trusting a checkpoint that was never
+     saved. Now only set by `director/signals.py`'s `on_job_finished` on
+     confirmed success.
+   - i2v's `first_frame` is a real input on the underlying sampler-prep
+     node regardless of Director's own continuity mechanism (Context only
+     wraps its *conditioning* output, it doesn't supply `first_frame`
+     itself) — a continuation clip with no image reference of its own
+     left the template's placeholder-example `LoadImage` wiring in place,
+     which ComfyUI's validation correctly rejected. Fixed by always
+     defaulting an i2v continuation's `first_frame` to the predecessor's
+     last frame when the user hasn't supplied one, independent of whether
+     full continuity or the fallback is active.
 
 ### Install (in ComfyUI)
 
@@ -260,48 +302,35 @@ git clone https://github.com/ethanfel/ComfyUI-MiniMaxH3-Contex-Loop.git
 
 Restart ComfyUI and hard-refresh the browser if you ever use its own UI.
 Optional ffmpeg on PATH (falls back to PyAV) — irrelevant to this app's own
-usage, which never touches that extension's own Plan/Assemble nodes.
-
-### How this app wires it in (today — see caveat above)
-
-- `integrations/motion_context.py::apply_motion_context()` would splice
-  the nodes above into a Director clip's workflow at render time
-  (`generation/tasks.py::build_api_workflow()`'s `continuation_params`
-  kwarg, set by `director/services.py::_build_job_for_clip()`) *if* those
-  nodes were reachable. The intended design: every Director-rendered clip
-  gets at least a SaveLatent node (so a *later* clip has a checkpoint to
-  continue from if it turns out to want one); a clip with
-  `continues_previous=True` additionally gets the full MotionContext/
-  LoopTrim splice, fed from the *previous* clip's own rendered video,
-  referenced **directly on ComfyUI's own machine** (via `LoadVideo`'s
-  `"name [output]"` folder-paths annotation, see `integrations/video_ref.py`)
-  rather than downloaded and re-uploaded through Django.
-  `GenerationJob.keep_comfyui_output`/`comfyui_output_filename`/
-  `_subfolder` exist to support this. None of it currently activates in
-  practice — see above.
+usage, which never touches that extension's own Plan/Assemble/Review nodes.
 
 ### Graceful fallback
 
-Director Mode never requires this extension to be installed — it's
-detected live (`integrations/motion_context.py::is_available()`, a cached
-`GET /object_info/MiniMaxH3MotionContext` check, also surfaced to the
-frontend via `GET /api/config/`'s `director_full_continuity_available`)
+Director Mode never requires this extension to be installed — availability
+is detected live (`integrations/motion_context.py::is_available()`, a
+cached `GET /object_info/MiniMaxH3ChainLoopStart` check, also surfaced to
+the frontend via `GET /api/config/`'s `director_full_continuity_available`)
 and degrades automatically rather than failing or disabling continuation:
 
-- **Not installed at all**, or **the previous clip was rendered before it
-  was installed** (so its ComfyUI-side output was never kept around to
-  reference): a `continues_previous` clip falls back to feeding the
-  previous clip's **last frame** in as an ordinary image reference (i2v's
-  `first_frame`, or r2v's first `<Picture N>`) instead of true motion/audio
-  continuity — a much weaker technique (no audio carries over, and motion
-  restarts from a single still frame rather than flowing continuously) but
-  still a real visual anchor, and it needs nothing beyond what this app
-  already keeps (the rendered `video_file` every job downloads regardless
-  — see `integrations/media_post.py::extract_last_frame()`).
-- **Self-healing**: this is re-checked on every render, not just once —
-  install the extension mid-project and the *next* clip you render
-  (continuation or not) automatically starts using full continuity again,
-  no re-render of earlier clips required.
+- **Not installed at all**, or **a continuation clip's immediate
+  predecessor has no real checkpoint of its own** (rendered before the
+  extension was available, or itself fell back) — a `continues_previous`
+  clip falls back to feeding the previous clip's **last frame** in as an
+  ordinary image reference (i2v's `first_frame`, or r2v's first
+  `<Picture N>`) instead of true motion/audio continuity — a much weaker
+  technique (no audio carries over, and motion restarts from a single
+  still frame rather than flowing continuously) but still a real visual
+  anchor, and it needs nothing beyond what this app already keeps (the
+  rendered `video_file` every job downloads regardless — see
+  `integrations/media_post.py::extract_last_frame()`).
+- **Self-healing at scene-start boundaries**: availability is re-checked on
+  every render, not just once — the next *fresh* (non-continuation) Clip
+  rendered always starts a brand-new full-continuity run if the extension
+  is available by then, regardless of how any earlier part of the project
+  rendered. A continuation Clip specifically inherits real continuity only
+  when its immediate predecessor has it too, so a chain that fell back
+  stays on the fallback until a fresh scene restarts it — not a per-clip
+  toggle, a property of where each continuation run began.
 - Director Mode itself is never disabled by the extension being absent —
   every other capability (multi-clip sequencing, dirty-cascade re-render,
   shared project prompt/resources) works identically either way; only the

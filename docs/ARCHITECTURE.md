@@ -1437,14 +1437,19 @@ Intentionally not built in this pass:
 - ~~Clip-chaining extras~~ — designed properly rather than bolted on, per
   the note that used to be here: see **Director Mode** below, a new
   `director` app (`Project`/`Clip`, dirty-cascade re-render,
-  `integrations/motion_context.py`'s continuity splice, with a graceful
+  `integrations/motion_context.py`'s real motion/audio continuity via
+  ComfyUI-MiniMaxH3-Contex-Loop's Chain pipeline, with a graceful
   last-frame fallback when that extension isn't installed — see
   `extras.md#contex-loop`). Backend (data model, render orchestration,
-  REST API) is built and structurally verified; the LLM script-to-clips
-  planning endpoint, final assembly/export, and the frontend board UI are
-  still in progress — this bullet stays here until all of that lands, at
-  which point it should move into this doc's main body instead of
-  Deferred.
+  REST API) is built; continuity itself is **verified working end to end
+  against a real ComfyUI install** (real two-clip renders, both through
+  raw ComfyUI calls and through the actual Director API, with visually
+  near-identical frames at the join — see extras.md#contex-loop's
+  "Verified live" section, including two real bugs that testing caught
+  and fixed). The LLM script-to-clips planning endpoint, final
+  assembly/export, and the frontend board UI are still in progress — this
+  bullet stays here until all of that lands, at which point it should
+  move into this doc's main body instead of Deferred.
 - **A general "extras" plugin registry** — the current `COMFYUI_EXTRAS`
   mechanism (`config/settings.py`) is deliberately a single purpose-built
   boolean (`GenerationJob.use_spectrum`) plus one splice function
