@@ -178,7 +178,22 @@ class Clip(models.Model):
 
     class Meta:
         ordering = ["project", "order"]
-        constraints = [models.UniqueConstraint(fields=["project", "order"], name="unique_project_clip_order")]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["project", "order"],
+                name="unique_project_clip_order",
+                # Checked at transaction commit, not per-statement -- a
+                # reorder (see director/api.py's reorder_clip) writes every
+                # affected sibling's new `order` one row at a time inside
+                # one atomic block, which otherwise collides mid-loop
+                # whenever two rows' positions swap (row A's new order
+                # temporarily equals row B's still-old order). Postgres-only
+                # feature (this deployment's only backend, see
+                # docker-compose.yml) -- Django's deferrable constraints
+                # aren't supported on SQLite/older MySQL.
+                deferrable=models.Deferrable.DEFERRED,
+            )
+        ]
 
     def __str__(self) -> str:
         return f"Clip({self.id}, project={self.project_id}, order={self.order})"
