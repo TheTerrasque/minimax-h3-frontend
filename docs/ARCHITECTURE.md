@@ -550,8 +550,15 @@ ones I invite"):
   rather than reusing the video guides verbatim — most of what a video
   prompt guide covers (motion, pacing, duration) doesn't apply once the
   output is a single frame or an audio track. `is_configured()` backs
-  `settings.LLM_ENABLED`. Two entry points: `improve_prompt()` (one-shot
-  rewrite) and `chat_reply()` (multi-turn, given the full prior history).
+  `settings.LLM_ENABLED`. Three entry points: `improve_prompt()` (one-shot
+  rewrite), `chat_reply()` (multi-turn, given the full prior history), and
+  `plan_scenes()` (one-shot script/idea → proposed scene list, backing
+  Director Mode's "Generate from script" — see below). Both
+  `improve_prompt()`/`chat_reply()` take an optional `extra_context`
+  string, appended to the system prompt via `_extra_context_note()` —
+  Director Mode's only hook into this module beyond `plan_scenes()` itself,
+  used to pass a project's `overarching_prompt` through so a clip's
+  refine/chat stays consistent with the rest of the project.
 - `media_post.py` — ffmpeg-based post-processing backing the experimental
   image/audio modes: pulls a still frame or the audio track out of the
   video `tasks.py` actually rendered, since those modes submit the same
@@ -562,6 +569,104 @@ ones I invite"):
   Python dotted path to a callable, wired into `llm.py`/`tasks.py` around
   the LLM call and the render itself. All optional/unset by default; see
   `backend/hooks_example.py` for the expected signature of each.
+
+## Director Mode
+
+A separate `director` app, layered strictly on top of `generation`
+(imports `generation`'s models/queue; `generation` never imports
+`director` back — the one seam that runs the other way is a Django
+signal, `generation.signals.job_finished`, connected from
+`director/apps.py`'s `ready()`). A "movie" is a `Project`: a title, an
+`overarching_prompt` (shared world/setting/character prose every clip
+draws on), a set of `ProjectResource`s (character sheets/voice/world
+refs), and an ordered sequence of `Clip`s — each one a single
+`GenerationJob`-backed render, positioned by `order`.
+
+- **Continuity** — a `Clip` can be flagged `continues_previous`
+  (positional: "splice motion/audio continuity from whichever clip is now
+  immediately before me", not a stored predecessor FK — reordering the
+  board changes what a continuation clip actually continues from, and
+  always marks it dirty). Real continuity goes through
+  `integrations/motion_context.py`'s splice into
+  ComfyUI-MiniMaxH3-Contex-Loop's Chain pipeline (`MiniMaxH3ChainPlan` →
+  `MiniMaxH3ChainLoopStart` → `MiniMaxH3ChainCurrent` →
+  `MiniMaxH3ChainContext` → `MiniMaxH3ChainSegmentSave`, `scene_range`
+  pinned to one scene per submission so this app's one-job-per-clip queue
+  model doesn't need the extension's own recursion/review-gate machinery).
+  `is_available()` live-checks (60s cached) whether the extension is
+  installed; when it isn't — or a continuation clip's immediate
+  predecessor has no real chain checkpoint of its own — `director/
+  services.py::_build_job_for_clip()` falls back to feeding the
+  predecessor's last extracted frame in as an ordinary image reference
+  (`integrations/media_post.py::extract_last_frame()`). See
+  `extras.md#contex-loop` for the extension's install/verification
+  details and the fallback's known tradeoffs (motion/audio can stutter at
+  the join without the real extension).
+- **Dirty-cascade** — editing a clip's render-affecting fields (prompt,
+  mode, refs, quality/duration, `continues_previous`) marks it dirty, then
+  walks forward marking every directly-chained `continues_previous` clip
+  after it dirty too, stopping at the next clip that starts a fresh scene.
+  Editing `Project.overarching_prompt`/resources dirties every clip in the
+  project (`director/services.py`'s `mark_dirty_cascade()`/
+  `mark_project_dirty()`).
+- **Render orchestration** — `render_clip()` walks backward to find the
+  head of a dirty continuation run and enqueues only that job;
+  `director/signals.py`'s `on_job_finished` receiver (listening to
+  `generation.signals.job_finished`) advances the chain by creating the
+  next clip's job once its predecessor succeeds, and is the only place
+  `Clip.chain_run_name`/`chain_scene_number` get set (only on confirmed
+  success — never eagerly at job-creation time, so a failed render can't
+  leave a later clip "resuming" from a checkpoint that was never actually
+  saved).
+- **LLM planning ("Generate from script")** — `POST
+  /api/director/projects/<id>/plan/` calls `integrations/llm.plan_scenes()`
+  (system context: `resources/prompt instructions/
+  DIRECTOR_PLAN_GUIDE_en.md`, concatenated with the base video prompt
+  guide) and returns a *preview* list of proposed scenes
+  (`{mode, continues_previous, prompt, notes}`) — nothing is created yet.
+  `director/services.py::normalize_planned_scenes()` coerces/repairs the
+  LLM's untrusted JSON reply (unknown mode → `t2v`, `continues_previous`
+  forced `False` when the mode can't support it) rather than failing the
+  whole plan over one bad entry. The user reviews/edits the preview
+  client-side, then `POST /api/director/projects/<id>/plan/apply/` (body:
+  the — possibly edited — scene list, `replace: bool`) calls
+  `apply_planned_scenes()` to actually create `Clip` rows, appended after
+  the project's existing clips by default or replacing them entirely.
+  Applying never itself triggers a render.
+- **Assembly/export** — `POST /api/director/projects/<id>/assemble/`
+  requires every clip to be rendered and clean, then concatenates their
+  videos in board order via `integrations/assembly.py::concat_videos()`
+  into `Project.assembled_video_file`. Deliberately **not** the
+  stream-copy concat demuxer (`-c copy`): Director allows each
+  non-continuation "fresh scene" clip its own aspect ratio/resolution,
+  which stream-copy concat doesn't tolerate reliably, so this always goes
+  through the concat *filter* instead — every clip is scaled/padded onto
+  the largest clip's resolution and normalized to the first clip's frame
+  rate before concatenation. Runs synchronously in the request (clips are
+  short, so total runtime is small); overwrites any previous export.
+- **Media serving** — `ProjectResource`/`ClipReferenceAsset`/
+  `Project.assembled_video_file` live under their own `director_*/`
+  `MEDIA_ROOT` prefixes, served by `director/media_views.py`'s own
+  ownership check (mirrors `generation/media_views.py`'s, duplicated
+  rather than shared so `generation` stays ignorant of `director`) —
+  wired into `config/urls.py` ahead of `generation`'s catch-all. Adding a
+  new `FileField` here needs a matching prefix added in **three** places:
+  the `re_path` in `config/urls.py`, `_owner_id_for_path()` in
+  `director/media_views.py`, and (if it should count toward a project's
+  storage) nowhere else today — see the `generation/media_views.py`
+  gotcha in `AGENTS.md` for what happens when this is forgotten.
+- **Frontend** — `frontend/src/features/director/`: `ProjectListScreen`
+  → `ProjectBoard` (title, overarching prompt, `ProjectResourcesPanel`,
+  the clip timeline with chain connectors between continuation boxes,
+  "Generate from script…"/"Render all dirty"/"Export" actions) →
+  `ClipEditorPanel` (prompt + AI refine/chat — reuses the same
+  `ChatModal`/`useRefinePrompt`/`useChatReply` as the main Generate
+  screen, just with the project's `overarching_prompt` threaded through as
+  `extra_context` — quality/duration/aspect-ratio controls, locked to the
+  predecessor's resolution while `continues_previous`, reference slots,
+  render/cancel/delete). `ScriptPlanModal` is the two-step "propose, then
+  confirm" UI for the LLM planning endpoints above. Routes: `/director`
+  and `/director/:projectId` in `App.tsx`.
 
 ## Frontend
 
@@ -1434,22 +1539,20 @@ Intentionally not built in this pass:
   is plain component state in `App.tsx`'s `MainLayout`, not synced to the
   URL (no `?job=<id>`); a deliberate simplification, easy to add later if
   bookmarking/sharing a specific job's view turns out to matter.
-- ~~Clip-chaining extras~~ — designed properly rather than bolted on, per
-  the note that used to be here: see **Director Mode** below, a new
-  `director` app (`Project`/`Clip`, dirty-cascade re-render,
-  `integrations/motion_context.py`'s real motion/audio continuity via
-  ComfyUI-MiniMaxH3-Contex-Loop's Chain pipeline, with a graceful
-  last-frame fallback when that extension isn't installed — see
-  `extras.md#contex-loop`). Backend (data model, render orchestration,
-  REST API) is built; continuity itself is **verified working end to end
-  against a real ComfyUI install** (real two-clip renders, both through
-  raw ComfyUI calls and through the actual Director API, with visually
-  near-identical frames at the join — see extras.md#contex-loop's
-  "Verified live" section, including two real bugs that testing caught
-  and fixed). The LLM script-to-clips planning endpoint, final
-  assembly/export, and the frontend board UI are still in progress — this
-  bullet stays here until all of that lands, at which point it should
-  move into this doc's main body instead of Deferred.
+- ~~Clip-chaining extras~~ — designed properly rather than bolted on: see
+  **Director Mode** above (backend, LLM planning, assembly/export, and the
+  frontend board UI are all built). Continuity itself is **verified
+  working end to end against a real ComfyUI install** (real two-clip
+  renders, both through raw ComfyUI calls and through the actual Director
+  API, with visually near-identical frames at the join — see
+  `extras.md#contex-loop`'s "Verified live" section). What's *not* yet
+  verified against a real ComfyUI/LLM install: `plan_scenes()`'s actual
+  output quality (the parsing/normalization path is exercised, but no real
+  script has been fed through it end to end yet) and `assembly.py`'s
+  concat filter against real multi-clip renders (built and reasoned
+  through carefully, but not yet run against real rendered videos) — worth
+  a real end-to-end pass before relying on either for something that
+  matters.
 - **A general "extras" plugin registry** — the current `COMFYUI_EXTRAS`
   mechanism (`config/settings.py`) is deliberately a single purpose-built
   boolean (`GenerationJob.use_spectrum`) plus one splice function

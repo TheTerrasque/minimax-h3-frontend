@@ -18,6 +18,7 @@ a user explicitly asks for it (the "AI refine" button or the chat).
 from __future__ import annotations
 
 import base64
+import json
 import re
 from functools import lru_cache
 
@@ -120,7 +121,7 @@ def _image_content_part(image_bytes: bytes, content_type: str) -> dict:
     return {"type": "image_url", "image_url": {"url": f"data:{content_type};base64,{b64}"}}
 
 
-def _post_chat_completion(messages: list[dict[str, str]]) -> str:
+def _post_chat_completion(messages: list[dict[str, str]], *, timeout: int = 120) -> str:
     if not is_configured():
         raise LLMError("No LLM is configured (LLM_API_BASE_URL/LLM_MODEL unset).")
     headers = {"Authorization": f"Bearer {settings.LLM_API_KEY}"} if settings.LLM_API_KEY else {}
@@ -134,7 +135,7 @@ def _post_chat_completion(messages: list[dict[str, str]]) -> str:
         f"{settings.LLM_API_BASE_URL.rstrip('/')}/chat/completions",
         headers=headers,
         json={"model": settings.LLM_MODEL, "messages": messages, "temperature": 0.4},
-        timeout=120,
+        timeout=timeout,
     )
     if resp.status_code >= 400:
         raise LLMError(f"LLM request failed: {resp.text}")
@@ -157,6 +158,25 @@ def _custom_system_note(mode_specific: str) -> str:
     parts = [settings.LLM_CUSTOM_SYSTEM_PROMPT.strip(), mode_specific.strip()]
     text = "\n\n".join(p for p in parts if p)
     return f"\n\n{text}" if text else ""
+
+
+def _extra_context_note(extra_context: str | None) -> str:
+    """Caller-supplied free-text context layered on top of the mode's own
+    house guide -- currently only Director Mode uses this (a project's
+    overarching_prompt: shared world/setting/character prose every clip in
+    the project should stay consistent with, see director/models.py's
+    Project docstring), threaded through from generation/api.py's
+    refine_prompt()/chat_message() views as an optional `extra_context`
+    field so this stays a generic capability rather than Director-specific
+    plumbing baked into this module.
+    """
+    text = (extra_context or "").strip()
+    if not text:
+        return ""
+    return (
+        "\n\nShared project context (setting/characters/continuity this prompt should stay "
+        f"consistent with -- don't just restate it, use it to inform word choices): {text}"
+    )
 
 
 def _duration_note(mode: str, duration_seconds: float | None) -> str:
@@ -190,6 +210,7 @@ def improve_prompt(
     reference_labels: list[str] | None = None,
     duration_seconds: float | None = None,
     reference_images: list[tuple[bytes, str]] | None = None,
+    extra_context: str | None = None,
 ) -> str:
     """One-shot rewrite of raw_prompt into MiniMax H3's expected prompt
     structure -- backs the "AI refine" button.
@@ -198,6 +219,8 @@ def improve_prompt(
     reference images (e.g. i2v's first/last frame) -- attached to the user
     message as vision content parts, same as chat_reply(), but only when
     settings.LLM_VISION_ENABLED; a no-op plain-text request otherwise.
+
+    extra_context: see _extra_context_note().
     """
     guide = _load_guide(mode)
     user_content: str | list[dict] = f"{_reference_note(reference_labels)}\n\nUser's raw prompt:\n{raw_prompt}"
@@ -213,7 +236,7 @@ def improve_prompt(
                 f"You rewrite user {_CONTENT_TYPE_BY_MODE[mode]} prompts to follow the house "
                 "prompt-writing guide below exactly. Output only the rewritten prompt, nothing else. "
                 f"{_PROMPT_STYLE_NOTE}"
-                f"{_duration_note(mode, duration_seconds)}\n\n{guide}"
+                f"{_duration_note(mode, duration_seconds)}{_extra_context_note(extra_context)}\n\n{guide}"
                 f"{_custom_system_note(settings.LLM_CUSTOM_SYSTEM_PROMPT_REFINE)}"
             ),
         },
@@ -230,6 +253,7 @@ def chat_reply(
     reference_images: list[tuple[bytes, str]] | None = None,
     improved_prompt: str = "",
     duration_seconds: float | None = None,
+    extra_context: str | None = None,
 ) -> str:
     """Multi-turn conversational prompt crafting -- backs the interactive
     chat feature. Entirely stateless: nothing here reads or writes
@@ -264,6 +288,8 @@ def chat_reply(
     silently ignore image_url content it doesn't understand. When disabled
     (or no images), this is a no-op and the request is plain text, same as
     before.
+
+    extra_context: see _extra_context_note().
     """
     guide = _load_guide(mode)
     draft_note = (
@@ -300,7 +326,7 @@ def chat_reply(
             "no commentary) whenever you use it. The rest of your reply (questions, suggestions, "
             "explanations) goes outside that block, as normal.\n\n"
             f"{_reference_note(reference_labels)}{draft_note}{improved_note}"
-            f"{_duration_note(mode, duration_seconds)}\n\n{guide}"
+            f"{_duration_note(mode, duration_seconds)}{_extra_context_note(extra_context)}\n\n{guide}"
             f"{_custom_system_note(settings.LLM_CUSTOM_SYSTEM_PROMPT_CHAT)}"
         ),
     }
@@ -317,3 +343,52 @@ def chat_reply(
         }
 
     return _post_chat_completion(messages)
+
+
+@lru_cache(maxsize=1)
+def _load_plan_guide() -> str:
+    path = settings.RESOURCES_DIR / "prompt instructions" / "DIRECTOR_PLAN_GUIDE_en.md"
+    return path.read_text(encoding="utf-8")
+
+
+def plan_scenes(idea_text: str, *, resource_labels: list[str] | None = None, extra_context: str | None = None) -> list:
+    """One-shot script/idea -> a proposed ordered sequence of Director Mode
+    scenes, backing "Generate from script". Returns whatever JSON value the
+    LLM replied with (expected: a list of {"mode", "continues_previous",
+    "prompt", "notes"} dicts, per DIRECTOR_PLAN_GUIDE_en.md) -- deliberately
+    untyped/unvalidated here, since this module has no notion of Director's
+    Mode/CONTINUATION_CAPABLE_MODES; director/services.py's
+    normalize_planned_scenes() is what turns this into a trustworthy shape
+    (the LLM's JSON is untrusted input, not a contract -- see that
+    function's docstring).
+
+    Raises LLMError both for a failed request and for a reply that isn't
+    parseable JSON at all, so callers only need to handle one exception
+    type for "the plan step itself didn't work" (a 502, same as
+    improve_prompt/chat_reply's own failure mode) -- as opposed to "the
+    JSON parsed but some scenes were junk", which normalize_planned_scenes
+    handles by dropping/repairing entries rather than raising.
+    """
+    plan_guide = _load_plan_guide()
+    prompt_guide = _load_guide("t2v")
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                f"{plan_guide}\n\n---\n\nHouse prompt-writing guide referenced above (T2VA/I2VA "
+                f"sections apply; ignore FL2VA/L2VA, this app never supplies a last-frame image):"
+                f"\n\n{prompt_guide}\n\n{_reference_note(resource_labels)}{_extra_context_note(extra_context)}"
+                f"{_custom_system_note(settings.LLM_CUSTOM_SYSTEM_PROMPT_REFINE)}"
+            ),
+        },
+        {"role": "user", "content": idea_text},
+    ]
+    # A full scene breakdown is many multi-paragraph prompts in one reply --
+    # far more output than a single refine/chat turn -- so this gets a
+    # longer timeout than _post_chat_completion's 120s default rather than
+    # sharing it and risking a spurious timeout on a longer script/idea.
+    reply = _strip_wrapping_fence(_post_chat_completion(messages, timeout=300))
+    try:
+        return json.loads(reply)
+    except json.JSONDecodeError as exc:
+        raise LLMError(f"The AI's reply wasn't valid JSON: {exc}") from exc

@@ -41,6 +41,13 @@ entrypoint via Docker Compose.
 - **A per-job history** — every past render, with download/delete/redo
 - **Separate accounts, separate renders** — everyone only ever sees their
   own queue and history, never anyone else's jobs or prompts
+- **Director Mode** — a video-editor-style board for sequencing multiple
+  clips into one longer video: chain clips together for seamless
+  motion/audio continuity between them, share a project-wide prompt and
+  reference images/voice/style across every clip, generate a first draft
+  of the whole sequence from a pasted script or idea, and export the
+  finished sequence as one downloadable video once every clip is
+  rendered. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#director-mode).
 
 ## Quick start
 

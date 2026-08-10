@@ -128,6 +128,14 @@ class RefinePromptRequestSerializer(serializers.Serializer):
         "actually sent to the LLM (as vision content) when settings.LLM_VISION_ENABLED; "
         "otherwise ignored.",
     )
+    extra_context = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="Optional caller-supplied context layered on top of the mode's own house "
+        "guide -- e.g. Director Mode passes its project's overarching_prompt here so refine "
+        "stays consistent with the rest of the project. See integrations/llm.py's "
+        "_extra_context_note().",
+    )
 
 
 class RefinePromptResponseSerializer(serializers.Serializer):
@@ -170,6 +178,11 @@ class ChatRequestSerializer(serializers.Serializer):
         required=False,
         help_text="Currently-staged reference images. Only actually sent to the LLM (as vision "
         "content) when settings.LLM_VISION_ENABLED; otherwise ignored.",
+    )
+    extra_context = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="See RefinePromptRequestSerializer.extra_context.",
     )
 
 
@@ -450,6 +463,7 @@ def refine_prompt(request):
             reference_labels,
             duration_seconds=duration_seconds,
             reference_images=reference_images,
+            extra_context=request.data.get("extra_context") or None,
         )
     except llm.LLMError as exc:
         return Response({"error": str(exc)}, status=502)
@@ -521,6 +535,7 @@ def chat_message(request):
             reference_images=reference_images,
             improved_prompt=improved_prompt,
             duration_seconds=duration_seconds,
+            extra_context=request.data.get("extra_context") or None,
         )
     except llm.LLMError as exc:
         return Response({"error": str(exc)}, status=502)

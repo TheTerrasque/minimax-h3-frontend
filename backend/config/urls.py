@@ -26,7 +26,7 @@ urlpatterns = [
     # Django tries re_paths in order and this is the more specific match;
     # everything else still falls through to generation's catch-all below.
     re_path(
-        rf"^{settings.MEDIA_URL.lstrip('/')}(?P<path>director_(?:resources|clip_references)/.*)$",
+        rf"^{settings.MEDIA_URL.lstrip('/')}(?P<path>director_(?:resources|clip_references|assembled_videos)/.*)$",
         serve_protected_director_media,
         {"document_root": settings.MEDIA_ROOT},
     ),

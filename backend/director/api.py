@@ -6,6 +6,11 @@ module's own docstring for the reasoning, followed here for consistency.
 
 from __future__ import annotations
 
+from pathlib import Path
+import tempfile
+
+from django.conf import settings
+from django.core.files.base import ContentFile
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -17,7 +22,7 @@ from rest_framework.response import Response
 from generation.api import _MAX_REFERENCE_AUDIO, _MAX_REFERENCE_IMAGES, _MAX_REFERENCE_VIDEO
 from generation.models import GenerationJob, Mode, ReferenceAsset, RenderDuration
 from generation.resolution import ASPECT_RATIO_VALUES, compute_resolution, is_valid_aspect_ratio
-from integrations import comfyui
+from integrations import assembly, comfyui, llm
 
 from . import services
 from .models import CONTINUATION_CAPABLE_MODES, Clip, ClipReferenceAsset, Project, ProjectResource
@@ -79,6 +84,31 @@ class ProjectSerializer(serializers.Serializer):
 class ProjectDetailSerializer(ProjectSerializer):
     resources = ProjectResourceSerializer(many=True)
     clips = ClipSerializer(many=True)
+    assembled_video_url = serializers.CharField(allow_null=True)
+
+
+class PlannedSceneSerializer(serializers.Serializer):
+    mode = serializers.ChoiceField(choices=Mode.choices)
+    continues_previous = serializers.BooleanField()
+    prompt = serializers.CharField()
+    notes = serializers.CharField(allow_blank=True, required=False)
+
+
+class PlanRequestSerializer(serializers.Serializer):
+    idea_text = serializers.CharField(help_text="A pasted script or loose idea to break into scenes.")
+
+
+class PlanResponseSerializer(serializers.Serializer):
+    scenes = PlannedSceneSerializer(many=True)
+
+
+class ApplyPlanRequestSerializer(serializers.Serializer):
+    scenes = PlannedSceneSerializer(many=True)
+    replace = serializers.BooleanField(
+        required=False,
+        default=False,
+        help_text="Delete all existing clips first instead of appending after them.",
+    )
 
 
 def _serialize_resource(resource: ProjectResource) -> dict:
@@ -134,6 +164,7 @@ def _serialize_project(project: Project, *, detail: bool = False) -> dict:
     if detail:
         data["resources"] = [_serialize_resource(r) for r in project.resources.all()]
         data["clips"] = [_serialize_clip(c) for c in project.clips.select_related("current_job").all()]
+        data["assembled_video_url"] = project.assembled_video_file.url if project.assembled_video_file else None
     return data
 
 
@@ -623,3 +654,129 @@ def cancel_clip(request, clip_id: int):
 
     clip.refresh_from_db()
     return Response(_serialize_clip(clip))
+
+
+@extend_schema(
+    summary="Generate a proposed clip sequence from a script/idea (preview only, not saved)",
+    description="Turns a pasted script/idea into an ordered list of proposed scenes via the "
+    "configured LLM -- nothing is created yet. Review/edit the result client-side, then POST it "
+    "to plan/apply/ to actually create clips from it.",
+    request=PlanRequestSerializer,
+    responses={
+        200: PlanResponseSerializer,
+        400: ErrorResponseSerializer,
+        404: OpenApiResponse(description="Not found."),
+        502: OpenApiResponse(ErrorResponseSerializer, description="The LLM request itself failed."),
+        503: OpenApiResponse(ErrorResponseSerializer, description="No LLM is configured."),
+    },
+    tags=["director"],
+)
+@api_view(["POST"])
+def plan_project(request, project_id: int):
+    project = _get_project(request, project_id)
+    if not settings.LLM_ENABLED:
+        return Response({"error": "No LLM is configured."}, status=503)
+
+    idea_text = request.data.get("idea_text", "")
+    if not idea_text.strip():
+        return Response({"error": "idea_text is required."}, status=400)
+
+    resource_labels = [r.label or r.token_label for r in project.resources.all()]
+    try:
+        raw_scenes = llm.plan_scenes(
+            idea_text, resource_labels=resource_labels, extra_context=project.overarching_prompt
+        )
+    except llm.LLMError as exc:
+        return Response({"error": str(exc)}, status=502)
+
+    scenes = services.normalize_planned_scenes(raw_scenes)
+    if not scenes:
+        return Response({"error": "The AI didn't return any usable scenes -- try rephrasing."}, status=502)
+    return Response({"scenes": scenes})
+
+
+@extend_schema(
+    summary="Apply a (possibly user-edited) planned scene list as real clips",
+    description="Appends after the project's existing clips by default; pass replace=true to "
+    "delete all existing clips first. Doesn't itself trigger any render -- use render_all/ "
+    "afterward.",
+    request=ApplyPlanRequestSerializer,
+    responses={
+        201: ClipSerializer(many=True),
+        400: ErrorResponseSerializer,
+        404: OpenApiResponse(description="Not found."),
+    },
+    tags=["director"],
+)
+@api_view(["POST"])
+def apply_plan(request, project_id: int):
+    project = _get_project(request, project_id)
+    scenes = request.data.get("scenes")
+    if not isinstance(scenes, list) or not scenes:
+        return Response({"error": "scenes (non-empty array) is required."}, status=400)
+    replace = bool(request.data.get("replace", False))
+
+    try:
+        services.apply_planned_scenes(project, scenes, replace=replace)
+    except services.PlanError as exc:
+        return Response({"error": str(exc)}, status=400)
+
+    return Response([_serialize_clip(c) for c in project.clips.select_related("current_job")], status=201)
+
+
+@extend_schema(
+    summary="Assemble every clip into one downloadable video, in order",
+    description="Concatenates every clip's rendered video, in board order, into one MP4 (see "
+    "integrations/assembly.py) and stores it as the project's assembled_video_file, replacing "
+    "any previous export. Requires every clip to have a rendered video and none to be dirty -- "
+    "render everything first.",
+    responses={
+        200: ProjectDetailSerializer,
+        400: ErrorResponseSerializer,
+        404: OpenApiResponse(description="Not found."),
+        409: OpenApiResponse(ErrorResponseSerializer, description="Some clip isn't rendered/clean yet."),
+        502: OpenApiResponse(ErrorResponseSerializer, description="ffmpeg failed to assemble the clips."),
+    },
+    tags=["director"],
+)
+@api_view(["POST"])
+def assemble_project(request, project_id: int):
+    project = _get_project(request, project_id)
+    clips = list(project.clips.select_related("current_job").order_by("order"))
+    if not clips:
+        return Response({"error": "This project has no clips yet."}, status=400)
+
+    not_rendered = [c for c in clips if not (c.current_job and c.current_job.video_file)]
+    if not_rendered:
+        return Response({"error": f"{len(not_rendered)} clip(s) haven't rendered a video yet."}, status=409)
+    dirty = [c for c in clips if c.needs_render]
+    if dirty:
+        return Response(
+            {"error": f"{len(dirty)} clip(s) need re-render before exporting -- render everything first."},
+            status=409,
+        )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        local_paths = []
+        for index, clip in enumerate(clips):
+            video_file = clip.current_job.video_file
+            suffix = Path(video_file.name).suffix or ".mp4"
+            local_path = Path(tmp) / f"clip_{index}{suffix}"
+            video_file.open("rb")
+            try:
+                local_path.write_bytes(video_file.read())
+            finally:
+                video_file.close()
+            local_paths.append(local_path)
+
+        try:
+            assembled_bytes = assembly.concat_videos(local_paths)
+        except assembly.AssemblyError as exc:
+            return Response({"error": str(exc)}, status=502)
+
+    if project.assembled_video_file:
+        project.assembled_video_file.delete(save=False)
+    project.assembled_video_file.save(
+        f"director_project_{project.id}_assembled.mp4", ContentFile(assembled_bytes), save=True
+    )
+    return Response(_serialize_project(project, detail=True))

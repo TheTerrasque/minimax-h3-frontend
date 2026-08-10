@@ -169,6 +169,10 @@ export function useRefinePrompt() {
        * LLM_VISION_ENABLED -- harmless (ignored) otherwise, but only worth
        * the upload when config.data.llm_vision_enabled is true. */
       referenceImages?: File[];
+      /** Optional shared context layered on top of the mode's own house
+       * guide -- Director Mode passes the project's overarching_prompt
+       * here so refine stays consistent with the rest of the project. */
+      extraContext?: string;
     }) => {
       const form = new FormData();
       form.set("mode", input.mode);
@@ -176,6 +180,7 @@ export function useRefinePrompt() {
       if (input.durationSeconds != null) form.set("duration_seconds", String(input.durationSeconds));
       for (const label of input.referenceLabels ?? []) form.append("reference_labels", label);
       for (const file of input.referenceImages ?? []) form.append("reference_images", file);
+      if (input.extraContext) form.set("extra_context", input.extraContext);
       return apiFetch<{ improved_prompt: string }>("/prompt/refine/", { method: "POST", body: form });
     },
   });
@@ -201,6 +206,10 @@ export interface ChatReplyInput {
    * the backend has LLM_VISION_ENABLED -- harmless (ignored) otherwise, but
    * only worth the upload when config.data.llm_vision_enabled is true. */
   referenceImages?: File[];
+  /** Optional shared context layered on top of the mode's own house
+   * guide -- Director Mode passes the project's overarching_prompt here
+   * so chat stays consistent with the rest of the project. */
+  extraContext?: string;
 }
 
 export function useChatReply() {
@@ -215,6 +224,7 @@ export function useChatReply() {
       if (input.durationSeconds != null) form.set("duration_seconds", String(input.durationSeconds));
       for (const label of input.referenceLabels ?? []) form.append("reference_labels", label);
       for (const file of input.referenceImages ?? []) form.append("reference_images", file);
+      if (input.extraContext) form.set("extra_context", input.extraContext);
       return apiFetch<ChatMessage>("/prompt/chat/", { method: "POST", body: form });
     },
   });

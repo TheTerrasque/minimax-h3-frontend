@@ -10,20 +10,36 @@ from __future__ import annotations
 import uuid
 
 from django.core.files.base import ContentFile
+from django.db import transaction
 from django_q.tasks import async_task
 
-from generation.models import GenerationJob, Mode, ReferenceAsset
+from generation.models import GenerationJob, Mode, ReferenceAsset, RenderPreset
+from generation.resolution import compute_resolution
 from integrations import media_post, motion_context
 
-from .models import Clip, Project
+from .models import CONTINUATION_CAPABLE_MODES, Clip, Project
 
 _ACTIVE_JOB_STATUSES = {GenerationJob.Status.QUEUED, GenerationJob.Status.PROCESSING}
+
+# Modes plan_scenes() (and a human editing its output) may propose -- r2v is
+# deliberately excluded here even though it's in CONTINUATION_CAPABLE_MODES:
+# it needs actual reference assets to be meaningful, which the planning
+# guide never asks the LLM to invent (see DIRECTOR_PLAN_GUIDE_en.md), so
+# there's no legitimate way for a planned scene to land on it.
+_PLANNABLE_MODES = {Mode.TEXT_TO_VIDEO, Mode.IMAGE_TO_VIDEO}
 
 
 class RenderConflict(Exception):
     """Raised when a render is requested for a Clip whose dirty chain
     overlaps one already in flight -- see render_clip(). Translated to a
     409 by director/api.py, same shape as generation/api.py's own 409s."""
+
+
+class PlanError(Exception):
+    """Raised by apply_planned_scenes() when the (possibly user-edited)
+    scene list can't be turned into real Clips -- e.g. no active
+    RenderPreset/RenderDuration exists for a proposed mode. Translated to a
+    400 by director/api.py."""
 
 
 def _predecessor(clip: Clip) -> Clip | None:
@@ -284,3 +300,97 @@ def mark_project_dirty(project: Project) -> None:
     so changing either invalidates the whole project, not just a cascade
     from one point."""
     project.clips.update(needs_render=True)
+
+
+def normalize_planned_scenes(raw_scenes) -> list[dict]:
+    """Coerces integrations.llm.plan_scenes()'s raw reply -- or a scene list
+    a user has since hand-edited in the preview step -- into the exact
+    shape apply_planned_scenes() and the API's response both expect:
+    [{"mode": str, "continues_previous": bool, "prompt": str, "notes": str}, ...].
+
+    The LLM's JSON is untrusted input, not a contract: silently drops
+    entries with no usable prompt and repairs everything else (unknown/
+    missing mode falls back to t2v, continues_previous is coerced to False
+    whenever the mode can't actually support it) rather than failing the
+    whole plan over one malformed scene. Positional continuity (can't
+    continue when this is the sequence's very first scene) is enforced by
+    apply_planned_scenes() instead, since that depends on whether this is
+    appended after existing clips.
+    """
+    scenes = []
+    for raw in raw_scenes if isinstance(raw_scenes, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        prompt = str(raw.get("prompt", "")).strip()
+        if not prompt:
+            continue
+        mode = raw.get("mode") if raw.get("mode") in _PLANNABLE_MODES else Mode.TEXT_TO_VIDEO
+        scenes.append(
+            {
+                "mode": mode,
+                "continues_previous": bool(raw.get("continues_previous")) and mode in CONTINUATION_CAPABLE_MODES,
+                "prompt": prompt,
+                "notes": str(raw.get("notes", "")).strip(),
+            }
+        )
+    return scenes
+
+
+def apply_planned_scenes(project: Project, scenes, *, replace: bool) -> list[Clip]:
+    """Turns a (possibly user-edited) scene list into real Clip rows,
+    appended after the project's existing clips by default, or replacing
+    them entirely when replace=True. Mirrors director/api.py's clips() POST
+    handler's default-resolution logic (first active RenderPreset/
+    RenderDuration for the mode, "16:9" unless continuing) since there's no
+    per-scene duration/aspect-ratio input here -- the user can still adjust
+    either afterward per-clip, same as any other clip. Doesn't itself
+    trigger any render.
+    """
+    normalized = normalize_planned_scenes(scenes)
+    if not normalized:
+        raise PlanError("No usable scenes to apply.")
+
+    with transaction.atomic():
+        if replace:
+            for clip in project.clips.all():
+                for ref in clip.references.all():
+                    ref.file.delete(save=False)
+            project.clips.all().delete()
+            predecessor: Clip | None = None
+            next_order = 0
+        else:
+            predecessor = project.clips.order_by("-order").first()
+            next_order = 0 if predecessor is None else predecessor.order + 1
+
+        created: list[Clip] = []
+        for scene in normalized:
+            mode = scene["mode"]
+            preset = RenderPreset.objects.filter(mode=mode, is_active=True).first()
+            duration = preset.durations.filter(is_active=True).first() if preset else None
+            if preset is None or duration is None:
+                raise PlanError(f"No active render preset/duration is configured for mode {mode!r}.")
+
+            continues_previous = scene["continues_previous"] and predecessor is not None
+            if continues_previous:
+                aspect_ratio, width, height = predecessor.aspect_ratio, predecessor.width, predecessor.height
+            else:
+                aspect_ratio = "16:9"
+                width, height = compute_resolution(preset.megapixels, aspect_ratio)
+
+            clip = Clip.objects.create(
+                project=project,
+                order=next_order,
+                continues_previous=continues_previous,
+                mode=mode,
+                prompt=scene["prompt"],
+                preset=preset,
+                duration=duration,
+                aspect_ratio=aspect_ratio,
+                width=width,
+                height=height,
+            )
+            created.append(clip)
+            predecessor = clip
+            next_order += 1
+
+    return created

@@ -1,6 +1,7 @@
 import { useEffect, useState, type KeyboardEvent } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
+  useAssembleProject,
   useCreateClip,
   useDirectorProject,
   useRenderAllDirty,
@@ -12,6 +13,7 @@ import { CONTINUATION_CAPABLE_MODES } from "../../api/types";
 import { ClipBox } from "./ClipBox";
 import { ClipEditorPanel } from "./ClipEditorPanel";
 import { ProjectResourcesPanel } from "./ProjectResourcesPanel";
+import { ScriptPlanModal } from "./ScriptPlanModal";
 
 // Director clips are scoped to the video-content modes only (see this
 // feature's own purpose -- sequencing video clips); image/audio modes stay
@@ -42,6 +44,7 @@ export function ProjectBoard() {
   const createClip = useCreateClip();
   const reorderClip = useReorderClip();
   const renderAllDirty = useRenderAllDirty();
+  const assembleProject = useAssembleProject();
 
   // Prefetched so "+ Add clip" can create one immediately with a sensible
   // default duration, without a request-then-wait step in between.
@@ -55,6 +58,7 @@ export function ProjectBoard() {
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [promptDraft, setPromptDraft] = useState("");
+  const [planModalOpen, setPlanModalOpen] = useState(false);
 
   // Deliberately narrower than "whenever project.data changes" -- this
   // project is polled every few seconds while a clip is rendering (see
@@ -105,6 +109,7 @@ export function ProjectBoard() {
 
   const dirtyCount = project.data?.clips.filter((c) => c.needs_render).length ?? 0;
   const selectedClip = project.data?.clips.find((c) => c.id === selectedClipId) ?? null;
+  const canAssemble = !!project.data?.clips.length && project.data.clips.every((c) => c.video_url && !c.needs_render);
 
   return (
     <section className="director-board">
@@ -159,6 +164,9 @@ export function ProjectBoard() {
           <ProjectResourcesPanel project={project.data} />
 
           <div className="director-board-actions">
+            <button type="button" onClick={() => setPlanModalOpen(true)}>
+              Generate from script…
+            </button>
             <button
               type="button"
               className="button button-primary"
@@ -167,7 +175,21 @@ export function ProjectBoard() {
             >
               {renderAllDirty.isPending ? "Starting…" : `Render all dirty (${dirtyCount})`}
             </button>
+            <button
+              type="button"
+              onClick={() => assembleProject.mutate(projectId)}
+              disabled={assembleProject.isPending || !canAssemble}
+              title={canAssemble ? undefined : "Every clip must be rendered and up to date first."}
+            >
+              {assembleProject.isPending ? "Assembling…" : "Export"}
+            </button>
+            {project.data.assembled_video_url && (
+              <a href={project.data.assembled_video_url} download className="button">
+                <span aria-hidden="true">⬇</span> Download export
+              </a>
+            )}
           </div>
+          {assembleProject.isError && <p className="error">Couldn't assemble the export. Try again.</p>}
 
           <div className="director-timeline">
             {project.data.clips.map((clip, index) => (
@@ -201,7 +223,16 @@ export function ProjectBoard() {
           projectId={projectId}
           clip={selectedClip}
           isFirstClip={selectedClip.order === 0}
+          overarchingPrompt={project.data?.overarching_prompt ?? ""}
           onClose={() => setSelectedClipId(null)}
+        />
+      )}
+
+      {planModalOpen && (
+        <ScriptPlanModal
+          projectId={projectId}
+          hasExistingClips={!!project.data?.clips.length}
+          onClose={() => setPlanModalOpen(false)}
         />
       )}
     </section>

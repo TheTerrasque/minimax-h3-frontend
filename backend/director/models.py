@@ -37,6 +37,10 @@ def clip_reference_upload_path(instance, filename: str) -> str:
     return _random_upload_path("director_clip_references", filename)
 
 
+def project_assembled_video_upload_path(instance, filename: str) -> str:
+    return _random_upload_path("director_assembled_videos", filename)
+
+
 class Project(models.Model):
     """One "movie": a title, a shared prompt/resource context every Clip
     draws on, and an ordered sequence of Clips (see Clip.order). Editing
@@ -52,6 +56,14 @@ class Project(models.Model):
         help_text="Shared world/setting/character context prose, given to every Clip's render "
         "and to the LLM prompt-assist calls made against this project's clips (see "
         "integrations/llm.py's extra_context).",
+    )
+    assembled_video_file = models.FileField(
+        upload_to=project_assembled_video_upload_path,
+        blank=True,
+        help_text="Final concatenated export of every clip in order -- see "
+        "integrations/assembly.py, set by POST .../assemble/. Overwritten (old file deleted) on "
+        "each re-export; not auto-invalidated when a clip is edited/re-rendered afterward, so a "
+        "stale export can persist until the user re-runs assemble.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

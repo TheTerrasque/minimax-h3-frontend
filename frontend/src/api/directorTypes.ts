@@ -63,4 +63,18 @@ export interface Project {
 export interface ProjectDetail extends Project {
   resources: ProjectResource[];
   clips: Clip[];
+  // Set once POST .../assemble/ has run at least once -- see
+  // ProjectBoard's Export button. Not auto-cleared by later clip edits, so
+  // a present URL doesn't guarantee it reflects the project's current state.
+  assembled_video_url: string | null;
+}
+
+// One proposed scene from POST .../plan/ -- a preview, not yet a real Clip.
+// Editable client-side (see ScriptPlanModal) before being sent back to
+// POST .../plan/apply/ to actually create clips from it.
+export interface PlannedScene {
+  mode: Mode;
+  continues_previous: boolean;
+  prompt: string;
+  notes: string;
 }

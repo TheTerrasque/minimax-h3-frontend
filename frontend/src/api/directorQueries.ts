@@ -4,7 +4,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "./client";
-import type { Clip, ClipReference, Project, ProjectDetail, ProjectResource } from "./directorTypes";
+import type { Clip, ClipReference, PlannedScene, Project, ProjectDetail, ProjectResource } from "./directorTypes";
 import type { Mode, ReferenceKind } from "./types";
 
 const ACTIVE_JOB_STATUSES = new Set(["queued", "processing"]);
@@ -262,6 +262,43 @@ export function useCancelClip() {
     mutationFn: ({ clipId }: { projectId: number; clipId: number }) =>
       apiFetch<Clip>(`/director/clips/${clipId}/cancel/`, { method: "POST" }),
     onSuccess: (_data, { projectId }) => {
+      void queryClient.invalidateQueries({ queryKey: ["director-project", projectId] });
+    },
+  });
+}
+
+// "Generate from script" -- see ScriptPlanModal. Preview-only: nothing is
+// created until the result is reviewed/edited and sent to useApplyPlan().
+export function usePlanFromScript() {
+  return useMutation({
+    mutationFn: ({ projectId, ideaText }: { projectId: number; ideaText: string }) =>
+      apiFetch<{ scenes: PlannedScene[] }>(`/director/projects/${projectId}/plan/`, {
+        method: "POST",
+        body: JSON.stringify({ idea_text: ideaText }),
+      }),
+  });
+}
+
+export function useApplyPlan() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ projectId, scenes, replace }: { projectId: number; scenes: PlannedScene[]; replace: boolean }) =>
+      apiFetch<Clip[]>(`/director/projects/${projectId}/plan/apply/`, {
+        method: "POST",
+        body: JSON.stringify({ scenes, replace }),
+      }),
+    onSuccess: (_data, { projectId }) => {
+      void queryClient.invalidateQueries({ queryKey: ["director-project", projectId] });
+    },
+  });
+}
+
+export function useAssembleProject() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (projectId: number) =>
+      apiFetch<ProjectDetail>(`/director/projects/${projectId}/assemble/`, { method: "POST" }),
+    onSuccess: (_data, projectId) => {
       void queryClient.invalidateQueries({ queryKey: ["director-project", projectId] });
     },
   });

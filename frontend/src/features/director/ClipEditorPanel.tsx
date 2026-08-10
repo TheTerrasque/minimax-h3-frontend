@@ -33,10 +33,15 @@ interface ClipEditorPanelProps {
   projectId: number;
   clip: Clip;
   isFirstClip: boolean;
+  // The project's shared world/character context -- passed to AI
+  // refine/chat as extra_context so this clip's prompt stays consistent
+  // with the rest of the project (see backend integrations/llm.py's
+  // _extra_context_note()).
+  overarchingPrompt: string;
   onClose: () => void;
 }
 
-export function ClipEditorPanel({ projectId, clip, isFirstClip, onClose }: ClipEditorPanelProps) {
+export function ClipEditorPanel({ projectId, clip, isFirstClip, overarchingPrompt, onClose }: ClipEditorPanelProps) {
   const config = useConfig();
   const presets = usePresets(clip.mode);
   const updateClip = useUpdateClip();
@@ -87,7 +92,12 @@ export function ClipEditorPanel({ projectId, clip, isFirstClip, onClose }: ClipE
 
   async function handleRefine() {
     if (!promptDraft.trim()) return;
-    const result = await refinePrompt.mutateAsync({ mode: clip.mode, rawPrompt: promptDraft, referenceLabels });
+    const result = await refinePrompt.mutateAsync({
+      mode: clip.mode,
+      rawPrompt: promptDraft,
+      referenceLabels,
+      extraContext: overarchingPrompt,
+    });
     await updateClip.mutateAsync({ projectId, clipId: clip.id, improvedPrompt: result.improved_prompt });
   }
 
@@ -105,6 +115,7 @@ export function ClipEditorPanel({ projectId, clip, isFirstClip, onClose }: ClipE
         rawPrompt: promptDraft,
         improvedPrompt: clip.improved_prompt,
         referenceLabels,
+        extraContext: overarchingPrompt,
       });
       setChatMessages((prev) => [...prev, reply]);
     } catch {

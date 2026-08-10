@@ -11,7 +11,7 @@ from __future__ import annotations
 from django.http import Http404, HttpRequest, HttpResponse
 from django.views.static import serve as serve_static
 
-from .models import ClipReferenceAsset, ProjectResource
+from .models import ClipReferenceAsset, Project, ProjectResource
 
 
 def _owner_id_for_path(path: str) -> int | None:
@@ -23,6 +23,8 @@ def _owner_id_for_path(path: str) -> int | None:
             .values_list("clip__project__user_id", flat=True)
             .first()
         )
+    if path.startswith("director_assembled_videos/"):
+        return Project.objects.filter(assembled_video_file=path).values_list("user_id", flat=True).first()
     return None
 
 
