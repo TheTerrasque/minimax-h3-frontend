@@ -68,6 +68,12 @@ class LLMError(RuntimeError):
 # frontend/src/features/generate/chatMarkdown.ts's matching constant.
 FINAL_PROMPT_FENCE = "final-prompt"
 
+# Style guidance baked into both default system prompts below, independent
+# of whatever structure the mode's house guide itself defines -- written
+# prompts should read clearly and spell things out rather than leaving them
+# for the render model to infer.
+_PROMPT_STYLE_NOTE = "Written prompts should be easy to read, and explicit rather than implicit."
+
 
 def is_configured() -> bool:
     # LLM_API_KEY is deliberately not required here -- see settings.py's
@@ -140,6 +146,19 @@ def _post_chat_completion(messages: list[dict[str, str]]) -> str:
     return reply
 
 
+def _custom_system_note(mode_specific: str) -> str:
+    """Optional site-specific system-prompt additions -- see
+    settings.LLM_CUSTOM_SYSTEM_PROMPT (applied by both callers below) and
+    the LLM_CUSTOM_SYSTEM_PROMPT_REFINE/_CHAT variants (mode_specific,
+    passed in by each caller). Appended after the house guide, in that
+    order, so site config can add to or steer the shipped behavior without
+    editing the guide files themselves. Empty (no-op) unless configured.
+    """
+    parts = [settings.LLM_CUSTOM_SYSTEM_PROMPT.strip(), mode_specific.strip()]
+    text = "\n\n".join(p for p in parts if p)
+    return f"\n\n{text}" if text else ""
+
+
 def _duration_note(mode: str, duration_seconds: float | None) -> str:
     # Image mode's duration is pinned to the technical minimum (only frame
     # 0 survives, see generation/models.py's Mode docstring) -- telling the
@@ -192,8 +211,10 @@ def improve_prompt(
             "role": "system",
             "content": (
                 f"You rewrite user {_CONTENT_TYPE_BY_MODE[mode]} prompts to follow the house "
-                "prompt-writing guide below exactly. Output only the rewritten prompt, nothing else."
+                "prompt-writing guide below exactly. Output only the rewritten prompt, nothing else. "
+                f"{_PROMPT_STYLE_NOTE}"
                 f"{_duration_note(mode, duration_seconds)}\n\n{guide}"
+                f"{_custom_system_note(settings.LLM_CUSTOM_SYSTEM_PROMPT_REFINE)}"
             ),
         },
         {"role": "user", "content": user_content},
@@ -264,7 +285,7 @@ def chat_reply(
             f"You help a user iteratively write and refine a {_CONTENT_TYPE_BY_MODE[mode]}-"
             "generation prompt for the MiniMax H3 model, by having a conversation with them -- "
             "ask clarifying questions when useful, suggest concrete ideas, and revise based on "
-            "their feedback. When revising an existing draft, change only what the user actually "
+            f"their feedback. {_PROMPT_STYLE_NOTE} When revising an existing draft, change only what the user actually "
             "asked you to change -- keep every other part of the current draft exactly as it is, "
             "word-for-word, unless they explicitly ask for a broader rewrite. The house "
             "prompt-writing guide below defines the exact structure "
@@ -280,6 +301,7 @@ def chat_reply(
             "explanations) goes outside that block, as normal.\n\n"
             f"{_reference_note(reference_labels)}{draft_note}{improved_note}"
             f"{_duration_note(mode, duration_seconds)}\n\n{guide}"
+            f"{_custom_system_note(settings.LLM_CUSTOM_SYSTEM_PROMPT_CHAT)}"
         ),
     }
     messages = [system_message, *history]

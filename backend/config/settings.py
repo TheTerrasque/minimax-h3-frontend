@@ -369,6 +369,17 @@ LLM_ENABLED = bool(LLM_API_BASE_URL and LLM_MODEL)
 # either way.
 LLM_VISION_ENABLED = env.bool("LLM_VISION_ENABLED", default=False)
 
+# Optional site-specific additions to the system prompt -- see
+# integrations/llm.py's _custom_system_note(). LLM_CUSTOM_SYSTEM_PROMPT is
+# appended in every LLM call (both improve_prompt() and chat_reply()); the
+# _REFINE/_CHAT variants append further, on top of that, only to their
+# respective call site. All blank (no-op) by default -- e.g. use these to
+# add a house style note or a standing constraint without editing the
+# shipped guide files in resources/prompt instructions/.
+LLM_CUSTOM_SYSTEM_PROMPT = env("LLM_CUSTOM_SYSTEM_PROMPT", default="")
+LLM_CUSTOM_SYSTEM_PROMPT_REFINE = env("LLM_CUSTOM_SYSTEM_PROMPT_REFINE", default="")
+LLM_CUSTOM_SYSTEM_PROMPT_CHAT = env("LLM_CUSTOM_SYSTEM_PROMPT_CHAT", default="")
+
 # Optional pre/post hooks around the LLM call and a job's render -- dotted
 # Python paths (same convention as ACCOUNT_ADAPTER above), each resolving to
 # a callable(**context) -- see integrations/hooks.py for the exact context
