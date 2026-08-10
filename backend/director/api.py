@@ -412,12 +412,109 @@ def clip_detail(request, clip_id: int):
                         )
                 setattr(clip, field, value)
                 changed = True
+
+        if "duration_id" in request.data or "aspect_ratio" in request.data:
+            duration = clip.duration
+            if "duration_id" in request.data:
+                duration = (
+                    RenderDuration.objects.filter(
+                        id=request.data.get("duration_id"),
+                        preset__mode=clip.mode,
+                        is_active=True,
+                        preset__is_active=True,
+                    )
+                    .select_related("preset")
+                    .first()
+                )
+                if duration is None:
+                    return Response(
+                        {"error": "duration_id must reference an active duration option for this clip's mode."},
+                        status=400,
+                    )
+
+            if clip.continues_previous:
+                # width/height/aspect_ratio stay exactly as inherited at
+                # creation -- MiniMaxH3ChainPlan's width/height apply to
+                # every scene in a run (see extras.md#contex-loop), so
+                # only duration/preset (length/steps) may change here, not
+                # resolution.
+                if "aspect_ratio" in request.data and request.data["aspect_ratio"] != clip.aspect_ratio:
+                    return Response(
+                        {"error": "aspect_ratio/resolution is locked to the predecessor while continues_previous is set."},
+                        status=400,
+                    )
+                clip.preset = duration.preset
+                clip.duration = duration
+            else:
+                aspect_ratio = request.data.get("aspect_ratio", clip.aspect_ratio)
+                if not is_valid_aspect_ratio(aspect_ratio):
+                    return Response(
+                        {"error": f"aspect_ratio must be one of {ASPECT_RATIO_VALUES}, or a custom W:H ratio."},
+                        status=400,
+                    )
+                width, height = compute_resolution(duration.preset.megapixels, aspect_ratio)
+                clip.preset = duration.preset
+                clip.duration = duration
+                clip.aspect_ratio = aspect_ratio
+                clip.width = width
+                clip.height = height
+            changed = True
+
         if changed:
             clip.save()
             services.mark_dirty_cascade(clip)
         return Response(_serialize_clip(clip))
 
     return Response(_serialize_clip(clip))
+
+
+@extend_schema(
+    summary="Add a reference (image/audio/video) to a clip",
+    description="Dirties this clip and cascades forward, same as clip_detail's PATCH.",
+    responses={201: ClipReferenceSerializer, 400: ErrorResponseSerializer, 404: OpenApiResponse(description="Not found.")},
+    tags=["director"],
+)
+@api_view(["POST"])
+def clip_references(request, clip_id: int):
+    clip = _get_clip(request, clip_id)
+
+    kind = request.data.get("kind")
+    if kind not in ReferenceAsset.Kind.values:
+        return Response({"error": f"kind must be one of {ReferenceAsset.Kind.values}"}, status=400)
+    file = request.FILES.get("file")
+    if file is None:
+        return Response({"error": "file is required."}, status=400)
+
+    limits = {
+        ReferenceAsset.Kind.IMAGE: _MAX_REFERENCE_IMAGES,
+        ReferenceAsset.Kind.AUDIO: _MAX_REFERENCE_AUDIO,
+        ReferenceAsset.Kind.VIDEO: _MAX_REFERENCE_VIDEO,
+    }[kind]
+    max_for_mode = limits[clip.mode]
+    existing_count = clip.references.filter(kind=kind).count()
+    if existing_count >= max_for_mode:
+        return Response(
+            {"error": f"{Mode(clip.mode).label} supports at most {max_for_mode} {kind} reference(s)."}, status=400
+        )
+
+    ref = ClipReferenceAsset.objects.create(clip=clip, kind=kind, order=existing_count, file=file)
+    services.mark_dirty_cascade(clip)
+    return Response(_serialize_clip_reference(ref), status=201)
+
+
+@extend_schema(
+    summary="Delete a clip reference",
+    responses={204: OpenApiResponse(description="Deleted."), 404: OpenApiResponse(description="Not found.")},
+    tags=["director"],
+)
+@api_view(["DELETE"])
+def clip_reference_detail(request, reference_id: int):
+    ref = get_object_or_404(ClipReferenceAsset, id=reference_id, clip__project__user=request.user)
+    clip = ref.clip
+    ref.file.delete(save=False)
+    ref.delete()
+    services.mark_dirty_cascade(clip)
+    return Response(status=204)
 
 
 @extend_schema(
