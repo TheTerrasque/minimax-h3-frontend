@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   useChatReply,
   useConfig,
@@ -9,14 +9,20 @@ import {
 } from "../../api/queries";
 import {
   CONTENT_TYPE_BY_MODE,
+  MAX_REFERENCE_AUDIO,
+  MAX_REFERENCE_IMAGES,
+  MAX_REFERENCE_VIDEO,
   MODE_LABELS,
   MODES_BY_CONTENT_TYPE,
+  REFERENCE_FLOW_MODES,
   type ChatMessage,
   type ContentType,
   type GenerationJobDetail,
   type Mode,
   type ReferenceAsset,
 } from "../../api/types";
+import { DropZone } from "../shared/DropZone";
+import { fetchAsFile, useObjectUrl, useObjectUrls } from "../shared/fileHelpers";
 import { ChatModal } from "./ChatModal";
 
 const CONTENT_TYPES: ContentType[] = ["video", "image", "audio"];
@@ -36,47 +42,6 @@ const CONTENT_TYPE_NOUN: Record<ContentType, string> = {
   audio: "audio",
 };
 
-// Only r2v/r2i/r2a actually take reference uploads (see api.py's
-// _MAX_REFERENCE_IMAGES/_MAX_REFERENCE_AUDIO below) -- i2v is its own
-// separate first/last-frame flow, not a "reference" one.
-const REFERENCE_FLOW_MODES: Mode[] = ["r2v", "r2i", "r2a"];
-
-// Mirrors generation/api.py's _MAX_REFERENCE_IMAGES/_MAX_REFERENCE_AUDIO --
-// what tasks.py actually wires into the ComfyUI workflow per mode (see
-// ARCHITECTURE.md). r2i gets 0 reference audio -- a still frame extracted
-// from the underlying render can't carry it, so offering the upload would
-// just be confusing (see backend's own comment on this).
-const MAX_REFERENCE_IMAGES: Record<Mode, number> = {
-  t2v: 0,
-  i2v: 2,
-  r2v: 9,
-  t2i: 0,
-  r2i: 9,
-  t2a: 0,
-  r2a: 9,
-};
-const MAX_REFERENCE_AUDIO: Record<Mode, number> = {
-  t2v: 0,
-  i2v: 0,
-  r2v: 3,
-  t2i: 0,
-  r2i: 0,
-  t2a: 0,
-  r2a: 3,
-};
-// Mirrors MAX_REFERENCE_AUDIO -- a reference video's audio track rides along
-// with the same upload (see backend's _MAX_REFERENCE_VIDEO), so it isn't
-// tracked as a separate limit.
-const MAX_REFERENCE_VIDEO: Record<Mode, number> = {
-  t2v: 0,
-  i2v: 0,
-  r2v: 3,
-  t2i: 0,
-  r2i: 0,
-  t2a: 0,
-  r2a: 3,
-};
-
 function formatDuration(seconds: number): string {
   if (seconds < 60) return `${Math.round(seconds)}s`;
   const minutes = Math.floor(seconds / 60);
@@ -88,96 +53,8 @@ function presetLabel(preset: { label: string; megapixels: number; is_draft: bool
   return `${preset.label} (${preset.megapixels}MP${preset.is_draft ? ", draft" : ""})`;
 }
 
-// Creates an object URL for a locally-staged file (thumbnail preview before
-// upload) and revokes it on change/unmount -- object URLs otherwise leak for
-// the page's lifetime.
-function useObjectUrl(file: File | null): string | null {
-  const [url, setUrl] = useState<string | null>(null);
-  useEffect(() => {
-    if (!file) {
-      setUrl(null);
-      return;
-    }
-    const objectUrl = URL.createObjectURL(file);
-    setUrl(objectUrl);
-    return () => URL.revokeObjectURL(objectUrl);
-  }, [file]);
-  return url;
-}
-
-function useObjectUrls(files: File[]): string[] {
-  const [urls, setUrls] = useState<string[]>([]);
-  useEffect(() => {
-    const objectUrls = files.map((f) => URL.createObjectURL(f));
-    setUrls(objectUrls);
-    return () => {
-      for (const u of objectUrls) URL.revokeObjectURL(u);
-    };
-  }, [files]);
-  return urls;
-}
-
 function hasUrl(r: ReferenceAsset): r is ReferenceAsset & { url: string } {
   return r.url != null;
-}
-
-// e.g. "image/*" -> files whose type starts with "image/". Matches what the
-// sibling <input accept="..."> already restricts the native picker to, so
-// drag-and-drop/paste can't sneak in a file type the form doesn't expect.
-function filesMatchingAccept(files: Iterable<File>, accept: string): File[] {
-  const prefix = accept.endsWith("/*") ? accept.slice(0, -1) : accept;
-  return Array.from(files).filter((f) => f.type.startsWith(prefix));
-}
-
-interface DropZoneProps {
-  accept: string;
-  onFiles: (files: File[]) => void;
-  className?: string;
-  children: ReactNode;
-}
-
-// Wraps a file-picker <label> (its <input type="file"> child is left
-// untouched, so click-to-browse keeps working exactly as before) so the
-// same slot also accepts drag-and-drop and clipboard paste. Paste has no
-// dedicated target of its own -- it fires wherever focus currently is, and
-// bubbles -- so this needs to be focusable itself (tabIndex, for
-// keyboard-only use) and also catches paste while its child <input> has
-// focus (e.g. right after a click-to-browse), since that event bubbles up
-// to this label too.
-function DropZone({ accept, onFiles, className, children }: DropZoneProps) {
-  const [isOver, setIsOver] = useState(false);
-
-  function handleDrop(e: React.DragEvent<HTMLLabelElement>) {
-    e.preventDefault();
-    setIsOver(false);
-    const files = filesMatchingAccept(e.dataTransfer.files, accept);
-    if (files.length) onFiles(files);
-  }
-
-  function handlePaste(e: React.ClipboardEvent<HTMLLabelElement>) {
-    const pasted = Array.from(e.clipboardData.items)
-      .filter((item) => item.kind === "file")
-      .map((item) => item.getAsFile())
-      .filter((f): f is File => f != null);
-    const files = filesMatchingAccept(pasted, accept);
-    if (files.length) onFiles(files);
-  }
-
-  return (
-    <label
-      className={["file-drop", className, isOver ? "drag-over" : ""].filter(Boolean).join(" ")}
-      tabIndex={0}
-      onDragOver={(e) => {
-        e.preventDefault();
-        setIsOver(true);
-      }}
-      onDragLeave={() => setIsOver(false)}
-      onDrop={handleDrop}
-      onPaste={handlePaste}
-    >
-      {children}
-    </label>
-  );
 }
 
 function gcd(a: number, b: number): number {
@@ -222,20 +99,6 @@ async function computeImageAspectRatio(file: File): Promise<MatchedAspectRatio |
   } finally {
     URL.revokeObjectURL(url);
   }
-}
-
-// Re-downloads an already-uploaded reference (used by "Redo") and repacks
-// it as a File -- a browser has no way to hand back the original File
-// object for something already uploaded, but the bytes are still sitting
-// at their (same-origin, session-cookie-authed) media URL, so refetching
-// them is the only way to actually restore it rather than leaving the
-// slot empty.
-async function fetchAsFile(ref: ReferenceAsset & { url: string }): Promise<File> {
-  const resp = await fetch(ref.url, { credentials: "include" });
-  if (!resp.ok) throw new Error(`Failed to fetch ${ref.url}: ${resp.status}`);
-  const blob = await resp.blob();
-  const filename = ref.url.split("/").pop()?.split("?")[0] || ref.label;
-  return new File([blob], filename, { type: blob.type });
 }
 
 interface GenerateScreenProps {
@@ -359,17 +222,17 @@ export function GenerateScreen({ redoJob, onRedoConsumed }: GenerateScreenProps)
         if (redoJob.mode === "i2v") {
           const [first, last] = images;
           const [firstFile, lastFile] = await Promise.all([
-            first ? fetchAsFile(first) : null,
-            last ? fetchAsFile(last) : null,
+            first ? fetchAsFile(first.url, first.label) : null,
+            last ? fetchAsFile(last.url, last.label) : null,
           ]);
           if (activeRedoIdRef.current !== redoId) return; // superseded by a newer redo
           setFirstFrame(firstFile);
           setLastFrame(lastFile);
         } else if (REFERENCE_FLOW_MODES.includes(redoJob.mode)) {
           const [imageFiles, audioFiles, videoFiles] = await Promise.all([
-            Promise.all(images.map(fetchAsFile)),
-            Promise.all(audioRefs.map(fetchAsFile)),
-            Promise.all(videoRefs.map(fetchAsFile)),
+            Promise.all(images.map((r) => fetchAsFile(r.url, r.label))),
+            Promise.all(audioRefs.map((r) => fetchAsFile(r.url, r.label))),
+            Promise.all(videoRefs.map((r) => fetchAsFile(r.url, r.label))),
           ]);
           if (activeRedoIdRef.current !== redoId) return; // superseded by a newer redo
           setRefImages(imageFiles);

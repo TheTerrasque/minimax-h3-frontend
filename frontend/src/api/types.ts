@@ -36,6 +36,55 @@ export const MODES_BY_CONTENT_TYPE: Record<ContentType, Mode[]> = {
   audio: ["t2a", "r2a"],
 };
 
+// Only r2v/r2i/r2a actually take reference uploads (see backend
+// generation/api.py's _MAX_REFERENCE_IMAGES/_MAX_REFERENCE_AUDIO below) --
+// i2v is its own separate first/last-frame flow, not a "reference" one.
+export const REFERENCE_FLOW_MODES: Mode[] = ["r2v", "r2i", "r2a"];
+
+// Mirrors generation/api.py's _MAX_REFERENCE_IMAGES -- what tasks.py
+// actually wires into the ComfyUI workflow per mode (see ARCHITECTURE.md).
+export const MAX_REFERENCE_IMAGES: Record<Mode, number> = {
+  t2v: 0,
+  i2v: 2,
+  r2v: 9,
+  t2i: 0,
+  r2i: 9,
+  t2a: 0,
+  r2a: 9,
+};
+
+// Mirrors generation/api.py's _MAX_REFERENCE_AUDIO. r2i gets 0 -- a still
+// frame extracted from the underlying render can't carry it, so offering
+// the upload would just be confusing (see backend's own comment on this).
+export const MAX_REFERENCE_AUDIO: Record<Mode, number> = {
+  t2v: 0,
+  i2v: 0,
+  r2v: 3,
+  t2i: 0,
+  r2i: 0,
+  t2a: 0,
+  r2a: 3,
+};
+
+// Mirrors generation/api.py's _MAX_REFERENCE_VIDEO -- a reference video's
+// audio track rides along with the same upload, so it isn't tracked as a
+// separate limit.
+export const MAX_REFERENCE_VIDEO: Record<Mode, number> = {
+  t2v: 0,
+  i2v: 0,
+  r2v: 3,
+  t2i: 0,
+  r2i: 0,
+  t2a: 0,
+  r2a: 3,
+};
+
+// Mirrors backend director/models.py's CONTINUATION_CAPABLE_MODES --
+// Director Mode's Clip.continues_previous is only offered for modes whose
+// sampler node produces a conditioning+latent pair MiniMaxH3ChainContext
+// can splice continuity into (see extras.md#contex-loop).
+export const CONTINUATION_CAPABLE_MODES = new Set<Mode>(["i2v", "r2v"]);
+
 export interface AspectRatioOption {
   value: string; // e.g. "16:9" -- pass as GenerationJob.aspect_ratio
   label: string; // e.g. "16:9 (Widescreen)"

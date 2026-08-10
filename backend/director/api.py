@@ -59,6 +59,9 @@ class ClipSerializer(serializers.Serializer):
     needs_render = serializers.BooleanField(help_text="The red-border dirty flag.")
     current_job_id = serializers.IntegerField(allow_null=True)
     current_job_status = serializers.CharField(allow_null=True)
+    phase = serializers.CharField(allow_null=True, help_text="See GenerationJob.Phase -- null unless processing.")
+    progress_current = serializers.IntegerField(allow_null=True)
+    progress_total = serializers.IntegerField(allow_null=True)
     video_url = serializers.CharField(allow_null=True)
     thumbnail_url = serializers.CharField(allow_null=True)
     error_message = serializers.CharField(allow_null=True)
@@ -110,6 +113,9 @@ def _serialize_clip(clip: Clip) -> dict:
         "needs_render": clip.needs_render,
         "current_job_id": job.id if job else None,
         "current_job_status": job.status if job else None,
+        "phase": job.phase or None if job else None,
+        "progress_current": job.progress_current if job else None,
+        "progress_total": job.progress_total if job else None,
         "video_url": job.video_file.url if job and job.video_file else None,
         "thumbnail_url": job.thumbnail_file.url if job and job.thumbnail_file else None,
         "error_message": job.error_message if job else None,

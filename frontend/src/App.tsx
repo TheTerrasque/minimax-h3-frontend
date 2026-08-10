@@ -4,6 +4,7 @@ import { useCurrentUser } from "./api/queries";
 import type { GenerationJobDetail } from "./api/types";
 import { AdminLayout, CatalogScreen, InvitesScreen } from "./features/admin";
 import { LoginScreen } from "./features/auth";
+import { ProjectBoard, ProjectListScreen } from "./features/director";
 import { GenerateScreen } from "./features/generate";
 import { JobModal, QueueSidebar } from "./features/queue";
 import "./App.css";
@@ -57,14 +58,13 @@ function App() {
     <>
       <nav className="app-nav">
         <span className="app-title">Minimax H3 Generator</span>
-        {me.data.is_staff && (
-          <div className="app-nav-links">
-            <NavLink to="/" end>
-              Generate
-            </NavLink>
-            <NavLink to="/manage">Admin</NavLink>
-          </div>
-        )}
+        <div className="app-nav-links">
+          <NavLink to="/" end>
+            Generate
+          </NavLink>
+          <NavLink to="/director">Director</NavLink>
+          {me.data.is_staff && <NavLink to="/manage">Admin</NavLink>}
+        </div>
         <span className="app-user">
           {me.data.username} · <a href="/accounts/logout/">Log out</a>
         </span>
@@ -72,6 +72,8 @@ function App() {
       <main>
         <Routes>
           <Route path="/" element={<MainLayout />} />
+          <Route path="/director" element={<ProjectListScreen />} />
+          <Route path="/director/:projectId" element={<ProjectBoard />} />
           <Route
             path="/manage"
             element={me.data.is_staff ? <AdminLayout /> : <Navigate to="/" replace />}
