@@ -417,14 +417,27 @@ export function ClipEditorPanel({
             <button type="button" className="button-danger" onClick={() => cancelClip.mutate({ projectId, clipId: clip.id })} disabled={cancelClip.isPending}>
               <span aria-hidden="true">⏹</span> {cancelClip.isPending ? "Cancelling…" : "Cancel render"}
             </button>
-          ) : (
+          ) : clip.needs_render ? (
             <button
               type="button"
               className="button button-primary"
               onClick={() => renderClip.mutate({ projectId, clipId: clip.id })}
-              disabled={renderClip.isPending || !clip.needs_render}
+              disabled={renderClip.isPending}
             >
-              {renderClip.isPending ? "Starting…" : clip.needs_render ? "Render" : "Rendered"}
+              {renderClip.isPending ? "Starting…" : "Render"}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => renderClip.mutate({ projectId, clipId: clip.id, force: true })}
+              disabled={renderClip.isPending}
+              title={
+                clip.continues_previous
+                  ? "Re-renders this exact scene again -- with an unchanged prompt, likely to come out near-identical since it reuses the same seed."
+                  : "Renders this clip again with a fresh seed."
+              }
+            >
+              {renderClip.isPending ? "Starting…" : "Re-render"}
             </button>
           )}
           {confirmingDelete ? (

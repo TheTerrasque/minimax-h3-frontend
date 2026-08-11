@@ -70,7 +70,28 @@ _AVAILABILITY_CACHE_SECONDS = 60
 GENERATION_FINGERPRINT = "director-v1"
 
 DEFAULT_CONTEXT_LENGTH = 22  # H3_CHAIN_FORMAT_GUIDE.md's tested default.
-DEFAULT_AUDIO_CONTEXT_LENGTH = 22
+
+# Deliberately NOT the extension's own "tested" 22 -- see chain_nodes.py's
+# MiniMaxH3ChainContext.apply(): every continuation clip always gets the
+# low-level motion-context node called with audio_mode="timeline" (hardcoded
+# there, not something a caller can override), whose own tooltip says the
+# pinned tail "gets coordinates on this clip's own timeline, end-aligned
+# with the pinned video, so the model reads it as this clip's sound so far
+# and continues it." Confirmed against a real render: a continuation clip
+# with a clean, well-structured, explicitly-quoted-dialogue prompt (correct
+# non_diegetic_music: N/A and all) still came out as continuous unintended
+# gibberish speech -- the pinned audio context's "keep talking" momentum
+# dominated over the text prompt, not a prompt-formatting problem. There's
+# no way to disable audio-context carryover outright while still getting
+# H3-generated audio per scene (the only mode that skips it, source_track,
+# requires an external audio track and stops H3 from generating audio at
+# all) -- audio_context_length is the one real lever: a much shorter pinned
+# tail should carry far less "still talking" momentum forward while leaving
+# video motion continuity (context_length above) untouched. Unverified
+# against a real render yet -- worth confirming this actually fixes it
+# before trusting it, and tuning further (even lower, or back up) if not.
+DEFAULT_AUDIO_CONTEXT_LENGTH = 3
+
 DEFAULT_SEGMENT_CRF = 28  # Checkpoint segment quality -- these aren't the delivered output, so bias toward smaller files over SegmentSave's own default(18).
 
 

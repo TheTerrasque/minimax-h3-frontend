@@ -457,17 +457,39 @@ def _build_job_for_clip(clip: Clip) -> GenerationJob:
     return job
 
 
-def render_clip(clip: Clip) -> GenerationJob | None:
+def render_clip(clip: Clip, *, force: bool = False) -> GenerationJob | None:
     """Renders `clip`, first (re-)rendering any dirty continuation
     predecessors it depends on -- see _chain_head(). Only the head's job is
     created now; the rest of the chain is created progressively as each
     predecessor finishes (see director/signals.py's _advance_chain()).
-    Returns None if `clip` wasn't actually dirty (nothing to do). Raises
-    RenderConflict if any Clip in the run already has a job in flight.
+    Returns None if `clip` wasn't actually dirty and force=False (nothing
+    to do). Raises RenderConflict if any Clip in the run already has a job
+    in flight.
+
+    force=True re-renders an already-clean Clip on request (e.g. "I didn't
+    like the outcome") -- marks it dirty first so a failed forced attempt
+    is correctly left re-renderable rather than silently staying "clean"
+    with a failed current_job (director/signals.py's on_job_finished()
+    only clears needs_render on success, and otherwise assumes it was
+    already True going in). Only ever forces `clip` itself dirty, not its
+    predecessor -- _chain_head() below stops at the first clean predecessor
+    either way, so a forced re-render never cascades backward.
+
+    Caveat for a continues_previous clip specifically: this resumes the
+    *same* chain run at the *same* scene number, which deterministically
+    re-derives the same seed (motion_context.base_seed_for_run() hashes
+    run_name alone) -- with an unchanged prompt, a forced re-render is
+    likely to reproduce a near-identical result, not a genuinely different
+    one. A non-continuing clip always mints a fresh run_name (a new uuid4)
+    on every render, so this limitation is specific to continuation clips
+    under the real Chain API, not force-re-render in general.
     """
     clip.refresh_from_db()
     if not clip.needs_render:
-        return None
+        if not force:
+            return None
+        clip.needs_render = True
+        clip.save(update_fields=["needs_render"])
 
     head = _chain_head(clip)
     run = list(

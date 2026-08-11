@@ -253,8 +253,22 @@ export function useReorderClip() {
 export function useRenderClip() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ clipId }: { projectId: number; clipId: number }) =>
-      apiFetch<Clip>(`/director/clips/${clipId}/render/`, { method: "POST" }),
+    mutationFn: ({
+      clipId,
+      force,
+    }: {
+      projectId: number;
+      clipId: number;
+      // Re-render an already-clean clip (e.g. the result wasn't liked) --
+      // normally a no-op otherwise. See backend director/api.py's
+      // render_clip() for the caveat on continues_previous clips reusing
+      // the same derived seed.
+      force?: boolean;
+    }) =>
+      apiFetch<Clip>(`/director/clips/${clipId}/render/`, {
+        method: "POST",
+        body: force ? JSON.stringify({ force: true }) : undefined,
+      }),
     onSuccess: (_data, { projectId }) => {
       void queryClient.invalidateQueries({ queryKey: ["director-project", projectId] });
     },

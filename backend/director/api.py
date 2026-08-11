@@ -727,6 +727,10 @@ def reorder_clip(request, clip_id: int):
 
 @extend_schema(
     summary="Render a clip (and any dirty continuation predecessors it depends on)",
+    description="Normally a no-op if the clip isn't dirty. Pass force=true to re-render an "
+    "already-clean clip anyway (e.g. the result wasn't liked) -- for a continues_previous clip "
+    "this resumes the same chain run/scene, which reuses the same derived seed, so an unchanged "
+    "prompt is likely to reproduce a near-identical result rather than a different one.",
     responses={
         200: ClipSerializer,
         404: OpenApiResponse(description="Not found."),
@@ -737,8 +741,9 @@ def reorder_clip(request, clip_id: int):
 @api_view(["POST"])
 def render_clip(request, clip_id: int):
     clip = _get_clip(request, clip_id)
+    force = str(request.data.get("force", "")).lower() in ("1", "true", "yes", "on")
     try:
-        services.render_clip(clip)
+        services.render_clip(clip, force=force)
     except services.RenderConflict as exc:
         return Response({"error": str(exc)}, status=409)
     clip.refresh_from_db()
