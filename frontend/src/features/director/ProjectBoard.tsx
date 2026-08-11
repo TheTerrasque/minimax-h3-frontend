@@ -8,9 +8,10 @@ import {
   useDirectorProject,
   useRenderAllDirty,
   useReorderClip,
+  useUpdateClip,
   useUpdateDirectorProject,
 } from "../../api/directorQueries";
-import { useConfig, usePresets } from "../../api/queries";
+import { useConfig, usePresets, useRefinePrompt } from "../../api/queries";
 import { CONTINUATION_CAPABLE_MODES, MODE_LABELS } from "../../api/types";
 import type { Clip } from "../../api/directorTypes";
 import { ClipBox } from "./ClipBox";
@@ -73,6 +74,8 @@ export function ProjectBoard() {
   const cancelAllRenders = useCancelAllRenders();
   const assembleProject = useAssembleProject();
   const checkContinuity = useCheckContinuity();
+  const refinePrompt = useRefinePrompt();
+  const updateClip = useUpdateClip();
 
   // Prefetched so "+ Add clip" can create one immediately with a sensible
   // default duration, without a request-then-wait step in between.
@@ -88,6 +91,9 @@ export function ProjectBoard() {
   const [promptDraft, setPromptDraft] = useState("");
   const [planModalOpen, setPlanModalOpen] = useState(false);
   const [continuityReportOpen, setContinuityReportOpen] = useState(false);
+  const [refineAllProgress, setRefineAllProgress] = useState<{ done: number; total: number; failed: number } | null>(
+    null,
+  );
 
   // Deliberately narrower than "whenever project.data changes" -- this
   // project is polled every few seconds while a clip is rendering (see
@@ -149,7 +155,45 @@ export function ProjectBoard() {
     await checkContinuity.mutateAsync(projectId);
   }
 
+  // Re-runs AI refine for every clip that already has an AI-refined
+  // prompt, using each clip's current context (project prompt, resources,
+  // its own place in the sequence) -- for when the project prompt or a
+  // shared reference changed after a clip was refined, leaving its
+  // improved_prompt stale. Only touches clips that opted into AI refine in
+  // the first place (a non-blank improved_prompt); a clip that's always
+  // just used its raw prompt keeps doing that. Sequential, not parallel --
+  // gentler on a self-hosted LLM server, and each clip's own extra_context
+  // includes the clips before it, so there's no benefit to racing them.
+  async function handleRefineAll() {
+    const proj = project.data;
+    if (!proj) return;
+    const targets = proj.clips.filter((c) => c.improved_prompt.trim());
+    if (targets.length === 0) return;
+    setRefineAllProgress({ done: 0, total: targets.length, failed: 0 });
+    let failed = 0;
+    for (const clip of targets) {
+      const referenceLabels = [...resourceLabels, ...clip.references.map((r) => r.label)];
+      const extraContext = [proj.overarching_prompt, buildPreviousClipsContext(proj.clips, clip.order)]
+        .filter(Boolean)
+        .join("\n\n");
+      try {
+        const result = await refinePrompt.mutateAsync({
+          mode: clip.mode,
+          rawPrompt: clip.prompt,
+          referenceLabels,
+          extraContext,
+          isContinuation: clip.continues_previous,
+        });
+        await updateClip.mutateAsync({ projectId, clipId: clip.id, improvedPrompt: result.improved_prompt });
+      } catch {
+        failed += 1;
+      }
+      setRefineAllProgress((prev) => (prev ? { ...prev, done: prev.done + 1, failed } : prev));
+    }
+  }
+
   const dirtyCount = project.data?.clips.filter((c) => c.needs_render).length ?? 0;
+  const refinableCount = project.data?.clips.filter((c) => c.improved_prompt.trim()).length ?? 0;
   const activeCount =
     project.data?.clips.filter((c) => c.current_job_status === "queued" || c.current_job_status === "processing")
       .length ?? 0;
@@ -262,6 +306,18 @@ export function ProjectBoard() {
                 {checkContinuity.isPending ? "Checking…" : "Check continuity"}
               </button>
             )}
+            {config.data?.llm_enabled && refinableCount > 0 && (
+              <button
+                type="button"
+                onClick={() => void handleRefineAll()}
+                disabled={!!refineAllProgress && refineAllProgress.done < refineAllProgress.total}
+                title="Re-run AI refine for every clip that already has an AI-refined prompt -- useful after changing the overarching prompt or a shared reference."
+              >
+                {refineAllProgress && refineAllProgress.done < refineAllProgress.total
+                  ? `Re-refining… (${refineAllProgress.done}/${refineAllProgress.total})`
+                  : `Re-refine all (${refinableCount})`}
+              </button>
+            )}
             <button
               type="button"
               className="button button-primary"
@@ -296,6 +352,13 @@ export function ProjectBoard() {
             )}
           </div>
           {assembleProject.isError && <p className="error">Couldn't assemble the export. Try again.</p>}
+          {refineAllProgress && refineAllProgress.done === refineAllProgress.total && (
+            <p className={refineAllProgress.failed ? "error" : "hint"}>
+              Re-refined {refineAllProgress.total - refineAllProgress.failed}/{refineAllProgress.total} clip
+              {refineAllProgress.total === 1 ? "" : "s"}
+              {refineAllProgress.failed ? ` — ${refineAllProgress.failed} failed, try again.` : "."}
+            </p>
+          )}
 
           <div className="director-timeline">
             {project.data.clips.map((clip, index) => (

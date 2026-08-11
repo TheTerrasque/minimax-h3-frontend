@@ -1,11 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
-import {
-  useCreateDirectorProject,
-  useDeleteDirectorProject,
-  useDirectorProjects,
-  useUpdateDirectorProject,
-} from "../../api/directorQueries";
+import { useCreateDirectorProject, useDeleteDirectorProject, useDirectorProjects } from "../../api/directorQueries";
 import type { Project } from "../../api/directorTypes";
 
 function relativeTime(iso: string): string {
@@ -18,20 +13,15 @@ function relativeTime(iso: string): string {
 }
 
 function formatEta(seconds: number): string {
-  if (seconds < 60) return `~${Math.round(seconds)}s`;
+  if (seconds < 60) return `~${Math.round(seconds)}s left`;
   const minutes = Math.round(seconds / 60);
-  return `~${minutes}m`;
+  return `~${minutes}m left`;
 }
 
-function progressLabel(project: Project): string | null {
-  const total = project.clip_count ?? 0;
-  if (total === 0) return null;
-  const dirty = project.dirty_count ?? 0;
-  const done = total - dirty;
-  const active = project.active_count ?? 0;
+function progressLabel(project: Project, done: number, total: number, active: number): string {
   const parts = [`${done}/${total} rendered`];
   if (active > 0) parts.push("rendering…");
-  else if (dirty > 0 && project.eta_seconds) parts.push(`${formatEta(project.eta_seconds)} to finish`);
+  else if (project.eta_seconds) parts.push(formatEta(project.eta_seconds));
   return parts.join(" · ");
 }
 
@@ -84,68 +74,31 @@ export function ProjectListScreen() {
 }
 
 function ProjectCard({ project, onOpen }: { project: Project; onOpen: () => void }) {
-  const updateProject = useUpdateDirectorProject();
   const deleteProject = useDeleteDirectorProject();
-  const [editingTitle, setEditingTitle] = useState(false);
-  const [titleDraft, setTitleDraft] = useState(project.title);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
-  async function saveTitle() {
-    setEditingTitle(false);
-    const trimmed = titleDraft.trim();
-    if (trimmed && trimmed !== project.title) {
-      await updateProject.mutateAsync({ projectId: project.id, title: trimmed });
-    } else {
-      setTitleDraft(project.title);
-    }
-  }
-
-  const progress = progressLabel(project);
+  const total = project.clip_count ?? 0;
+  const dirty = project.dirty_count ?? 0;
+  const active = project.active_count ?? 0;
+  const done = total - dirty;
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
 
   return (
     <li className="director-project-card">
-      {editingTitle ? (
-        <input
-          type="text"
-          className="director-project-card-title-input"
-          autoFocus
-          value={titleDraft}
-          maxLength={200}
-          onClick={(e) => e.stopPropagation()}
-          onChange={(e) => setTitleDraft(e.target.value)}
-          onBlur={() => void saveTitle()}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") e.currentTarget.blur();
-            if (e.key === "Escape") {
-              setTitleDraft(project.title);
-              setEditingTitle(false);
-            }
-          }}
-        />
-      ) : (
-        <button type="button" className="director-project-card-open" onClick={onOpen}>
-          <span className="director-project-card-title">{project.title || `Project ${project.id}`}</span>
-          <span className="director-project-card-meta">
-            Updated {relativeTime(project.updated_at)}
-            {progress && <> · {progress}</>}
-          </span>
-        </button>
-      )}
+      <button type="button" className="director-project-card-open" onClick={onOpen}>
+        <span className="director-project-card-title">{project.title || `Project ${project.id}`}</span>
+        <span className="director-project-card-meta">
+          Updated {relativeTime(project.updated_at)}
+          {total > 0 && <> · {progressLabel(project, done, total, active)}</>}
+        </span>
+        {total > 0 && (
+          <div className="job-progress-track director-project-progress-track">
+            <div className="job-progress-fill" style={{ width: `${pct}%` }} />
+          </div>
+        )}
+      </button>
 
       <div className="director-project-card-actions">
-        {!editingTitle && (
-          <button
-            type="button"
-            className="link-button"
-            onClick={(e) => {
-              e.stopPropagation();
-              setTitleDraft(project.title);
-              setEditingTitle(true);
-            }}
-          >
-            Rename
-          </button>
-        )}
         {confirmingDelete ? (
           <>
             <span className="hint">Delete this project? This can't be undone.</span>

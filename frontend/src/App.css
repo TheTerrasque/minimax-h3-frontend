@@ -947,6 +947,17 @@ select {
   background: var(--code-bg);
 }
 
+/* The base -2px/-4px margin above exists to cancel the hover-box padding
+   so a title editable *inside a modal* doesn't shift against the modal's
+   own edge padding -- but the project board's title isn't in a modal, so
+   that left it with almost no breathing room above/below. Higher
+   specificity (two classes) wins over the shared rule regardless of
+   source order. */
+.director-board .modal-title-editable,
+.director-board .modal-title-input {
+  margin: 20px -4px 16px;
+}
+
 .modal-title-input {
   font: inherit;
   font-weight: 700;
@@ -1517,19 +1528,6 @@ select {
   color: inherit;
 }
 
-.director-project-card-title-input {
-  font: inherit;
-  font-weight: 600;
-  font-size: 1em;
-  width: calc(100% - 32px);
-  margin: 14px 16px 0;
-  padding: 2px 4px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--bg);
-  color: inherit;
-}
-
 .director-project-card-title {
   font-weight: 600;
   color: var(--text-h);
@@ -1546,6 +1544,10 @@ select {
   gap: 10px;
   padding: 0 16px 12px;
   font-size: 13px;
+}
+
+.director-project-progress-track {
+  margin-top: 2px;
 }
 
 .director-board {
