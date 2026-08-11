@@ -232,6 +232,12 @@ export function ClipEditorPanel({
           <p className="hint clip-editor-locked-note">
             Quality and aspect ratio are set for the whole project — see the project board.
           </p>
+          {clip.continues_previous && (
+            <p className="hint clip-editor-locked-note">
+              Length is locked to the previous clip's while continuing it — real motion/audio
+              continuity submits one length for the whole chain.
+            </p>
+          )}
           <label className="toolbar-control toolbar-control-wide">
             <span>
               Length: {selectedDuration ? `${selectedDuration.duration_seconds}s` : "—"}
@@ -243,7 +249,7 @@ export function ClipEditorPanel({
               max={Math.max(durations.length - 1, 0)}
               step={1}
               value={selectedDurationIndex}
-              disabled={durations.length < 2}
+              disabled={durations.length < 2 || clip.continues_previous}
               onChange={(e) => {
                 const d = durations[Number(e.target.value)];
                 if (d) void handleDurationChange(d.id);

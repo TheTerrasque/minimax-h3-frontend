@@ -396,6 +396,17 @@ def _resolve_clip_duration_and_resolution(request, project: Project, mode: str, 
     if preset is None:
         return Response({"error": f"No active render preset is configured for mode {mode!r}."}, status=400)
 
+    if continues_previous:
+        predecessor = project.clips.order_by("-order").first()
+        if predecessor is None:
+            return Response({"error": "continues_previous requires an existing predecessor clip."}, status=400)
+        # Duration is locked to the predecessor's own value while
+        # continuing, same as width/height -- real chain continuity
+        # submits one duration for the whole run, see
+        # services.resolve_clip_duration()'s docstring. duration_id from
+        # the request is ignored here, not validated.
+        return preset, predecessor.duration, predecessor.width, predecessor.height
+
     duration = RenderDuration.objects.filter(
         id=request.data.get("duration_id"), preset=preset, is_active=True
     ).first()
@@ -404,13 +415,6 @@ def _resolve_clip_duration_and_resolution(request, project: Project, mode: str, 
             {"error": "duration_id must reference an active duration option for this project's quality tier."},
             status=400,
         )
-
-    if continues_previous:
-        predecessor = project.clips.order_by("-order").first()
-        if predecessor is None:
-            return Response({"error": "continues_previous requires an existing predecessor clip."}, status=400)
-        return preset, duration, predecessor.width, predecessor.height
-
     width, height = compute_resolution(preset.megapixels, project.aspect_ratio)
     return preset, duration, width, height
 
@@ -554,6 +558,15 @@ def clip_detail(request, clip_id: int):
                 changed = True
 
         if "duration_id" in request.data:
+            if clip.continues_previous:
+                # Locked to the predecessor's own duration while
+                # continuing -- real chain continuity submits one duration
+                # for the whole run, see services.resolve_clip_duration()'s
+                # docstring on why this isn't just cosmetic.
+                return Response(
+                    {"error": "duration is locked to the predecessor's while continues_previous is set."},
+                    status=400,
+                )
             # Quality (preset) is project-wide, not editable per-clip here
             # -- see Project.quality_label -- so this only ever swaps
             # length within the clip's already-resolved preset.
@@ -570,8 +583,10 @@ def clip_detail(request, clip_id: int):
 
         if resolution_may_change:
             # continues_previous just changed -- re-lock (or release)
-            # width/height to/from the immediate predecessor's own values.
+            # width/height/duration to/from the immediate predecessor's
+            # own values.
             clip.width, clip.height = services.resolve_clip_width_height(clip)
+            clip.duration = services.resolve_clip_duration(clip)
 
         if changed:
             clip.save()

@@ -117,9 +117,10 @@ def recompute_project_resolutions(project: Project) -> None:
     project's current aspect_ratio/quality_label -- call after either
     changes (see director/api.py's project_detail() PATCH). Both are
     project-wide settings now (MiniMax H3's continuity model requires
-    consistent resolution across a chain, and a shared quality tier keeps
-    every clip's render comparable); a Clip's own preset/width/height are
-    just cached derivations of them, not independently chosen.
+    consistent resolution *and duration* across a chain, and a shared
+    quality tier keeps every clip's render comparable); a Clip's own
+    preset/duration/width/height are just cached derivations of them, not
+    independently chosen.
     """
     predecessor: Clip | None = None
     for clip in project.clips.order_by("order").select_related("preset", "duration"):
@@ -134,6 +135,7 @@ def recompute_project_resolutions(project: Project) -> None:
 
         if clip.continues_previous and predecessor is not None:
             clip.width, clip.height = predecessor.width, predecessor.height
+            clip.duration = predecessor.duration
         else:
             clip.width, clip.height = compute_resolution(clip.preset.megapixels, project.aspect_ratio)
 
@@ -156,6 +158,30 @@ def resolve_clip_width_height(clip: Clip) -> tuple[int, int]:
         if predecessor is not None:
             return predecessor.width, predecessor.height
     return compute_resolution(clip.preset.megapixels, clip.project.aspect_ratio)
+
+
+def resolve_clip_duration(clip: Clip) -> RenderDuration:
+    """The RenderDuration `clip` must actually use right now -- locked to
+    the immediate predecessor's own duration while continues_previous
+    (transitively, the whole run's duration, since every continuing clip
+    locks to whichever comes right before it), otherwise `clip`'s own.
+
+    This isn't a resolution/aspect-ratio-style cosmetic lock: real chain
+    continuity submits one `default_duration_seconds` for the *entire*
+    plan (see _resolve_chain_params()), validated by ComfyUI's
+    MiniMaxH3ChainLoopStart against whatever scene 1 was originally
+    submitted with -- a per-clip duration that drifts from the run's
+    first clip makes every later resubmission in that run fail outright
+    ("clip N was generated from different settings, prompts, seeds, or
+    durations", confirmed against a real failure). Used both when
+    continues_previous is toggled after creation (clip_detail() PATCH)
+    and defensively inside _resolve_chain_params() itself.
+    """
+    if clip.continues_previous:
+        predecessor = _predecessor(clip)
+        if predecessor is not None:
+            return predecessor.duration
+    return clip.duration
 
 
 def project_requires_reference_mode(project: Project) -> bool:
@@ -288,6 +314,17 @@ def _resolve_chain_params(clip: Clip) -> dict | None:
     assert len(chain_clips) == scene_number, "chain_run_prefix_clips length must match scene_number"
     shots = [{"id": f"clip{c.id}", "prompt": c.prompt.strip() or " "} for c in chain_clips]
 
+    # default_duration_seconds/default_steps apply to the whole plan, not
+    # just this scene -- MiniMaxH3ChainLoopStart validates every
+    # resubmission against whatever scene 1 (chain_clips[0]) was
+    # originally submitted with, and rejects the resume otherwise
+    # ("clip N was generated from different settings, prompts, seeds, or
+    # durations", confirmed against a real failure). director/api.py locks
+    # a continuing Clip's own duration to its predecessor's at edit time
+    # (resolve_clip_duration()) so this should already agree with `clip`'s
+    # own values in practice -- reading from chain_clips[0] here too is
+    # belt-and-suspenders against any clip created before that lock existed.
+    head = chain_clips[0]
     return {
         "shots": shots,
         "prompt_prefix": clip.project.overarching_prompt,
@@ -295,8 +332,8 @@ def _resolve_chain_params(clip: Clip) -> dict | None:
         "scene_number": scene_number,
         "width": clip.width,
         "height": clip.height,
-        "default_duration_seconds": clip.duration.duration_seconds,
-        "default_steps": clip.preset.steps,
+        "default_duration_seconds": head.duration.duration_seconds,
+        "default_steps": head.preset.steps,
     }
 
 
@@ -574,7 +611,12 @@ def apply_planned_scenes(project: Project, scenes, *, replace: bool) -> list[Cli
 
             continues_previous = scene["continues_previous"] and predecessor is not None
             if continues_previous:
+                # Locked to the predecessor's own width/height/duration --
+                # see resolve_clip_width_height()/resolve_clip_duration()'s
+                # docstrings on why duration in particular isn't just
+                # cosmetic for a continuing clip.
                 width, height = predecessor.width, predecessor.height
+                duration = predecessor.duration
             else:
                 width, height = compute_resolution(preset.megapixels, project.aspect_ratio)
 
