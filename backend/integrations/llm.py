@@ -351,7 +351,13 @@ def _load_plan_guide() -> str:
     return path.read_text(encoding="utf-8")
 
 
-def plan_scenes(idea_text: str, *, resource_labels: list[str] | None = None, extra_context: str | None = None) -> list:
+def plan_scenes(
+    idea_text: str,
+    *,
+    resource_labels: list[str] | None = None,
+    extra_context: str | None = None,
+    require_reference_mode: bool = False,
+) -> list:
     """One-shot script/idea -> a proposed ordered sequence of Director Mode
     scenes, backing "Generate from script". Returns whatever JSON value the
     LLM replied with (expected: a list of {"mode", "continues_previous",
@@ -362,6 +368,15 @@ def plan_scenes(idea_text: str, *, resource_labels: list[str] | None = None, ext
     (the LLM's JSON is untrusted input, not a contract -- see that
     function's docstring).
 
+    require_reference_mode: True once the target project has shared
+    resources -- every clip must then be r2v (only r2v can actually wire a
+    shared resource into a render), so this swaps in the reference variant
+    of the house prompt guide instead of the base one, and tells the model
+    every scene must be r2v and should use the listed reference tokens
+    where relevant. normalize_planned_scenes() enforces the mode itself
+    regardless of what comes back here -- this only shapes what gets
+    written, not what's trusted.
+
     Raises LLMError both for a failed request and for a reply that isn't
     parseable JSON at all, so callers only need to handle one exception
     type for "the plan step itself didn't work" (a 502, same as
@@ -370,14 +385,28 @@ def plan_scenes(idea_text: str, *, resource_labels: list[str] | None = None, ext
     handles by dropping/repairing entries rather than raising.
     """
     plan_guide = _load_plan_guide()
-    prompt_guide = _load_guide("t2v")
+    prompt_guide = _load_guide("r2v" if require_reference_mode else "t2v")
+    mode_note = (
+        "\n\nThis project has shared reference assets attached -- every scene you propose must "
+        'use "mode": "r2v" and its prompt must follow the reference guide below\'s structure, '
+        "incorporating the listed reference token(s) wherever genuinely relevant to that scene's "
+        "content. Never invent a token that isn't listed, and never force one in where it doesn't "
+        "actually apply."
+        if require_reference_mode
+        else ""
+    )
+    guide_note = (
+        "reference sections apply"
+        if require_reference_mode
+        else "T2VA/I2VA sections apply; ignore FL2VA/L2VA, this app never supplies a last-frame image"
+    )
     messages = [
         {
             "role": "system",
             "content": (
-                f"{plan_guide}\n\n---\n\nHouse prompt-writing guide referenced above (T2VA/I2VA "
-                f"sections apply; ignore FL2VA/L2VA, this app never supplies a last-frame image):"
-                f"\n\n{prompt_guide}\n\n{_reference_note(resource_labels)}{_extra_context_note(extra_context)}"
+                f"{plan_guide}{mode_note}\n\n---\n\nHouse prompt-writing guide referenced above "
+                f"({guide_note}):\n\n{prompt_guide}\n\n{_reference_note(resource_labels)}"
+                f"{_extra_context_note(extra_context)}"
                 f"{_custom_system_note(settings.LLM_CUSTOM_SYSTEM_PROMPT_REFINE)}"
             ),
         },

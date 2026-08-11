@@ -1,11 +1,18 @@
 import { useState } from "react";
 import { useApplyPlan, usePlanFromScript } from "../../api/directorQueries";
-import type { PlannedScene } from "../../api/directorTypes";
+import type { PlannedScene, ProjectResource } from "../../api/directorTypes";
 import { MODE_LABELS } from "../../api/types";
 
 interface ScriptPlanModalProps {
   projectId: number;
   hasExistingClips: boolean;
+  // Shown so the user knows what's already available to mention by name in
+  // their idea text -- the LLM gets these (with their token + label)
+  // automatically either way (see backend director/api.py's plan_project()),
+  // this is just so the user isn't guessing what "Picture 1" refers to.
+  // Non-empty here implies every generated scene will be forced to a
+  // reference clip -- see project_requires_reference_mode().
+  projectResources: ProjectResource[];
   onClose: () => void;
 }
 
@@ -15,7 +22,7 @@ interface ScriptPlanModalProps {
 // purpose (propose, then a separate confirm) rather than creating clips
 // straight from the LLM's reply -- an unreviewed AI-generated sequence is
 // exactly the kind of thing a user should get to look at first.
-export function ScriptPlanModal({ projectId, hasExistingClips, onClose }: ScriptPlanModalProps) {
+export function ScriptPlanModal({ projectId, hasExistingClips, projectResources, onClose }: ScriptPlanModalProps) {
   const planFromScript = usePlanFromScript();
   const applyPlan = useApplyPlan();
 
@@ -57,6 +64,22 @@ export function ScriptPlanModal({ projectId, hasExistingClips, onClose }: Script
               Paste a script or a loose idea — the AI will break it into an ordered sequence of
               clips you can review and edit before anything is created.
             </p>
+            {projectResources.length > 0 && (
+              <div className="plan-resource-hint">
+                <p className="hint">
+                  This project has shared references, so every generated scene will be a reference
+                  clip that can draw on them where relevant:
+                </p>
+                <ul className="plan-resource-list">
+                  {projectResources.map((resource) => (
+                    <li key={resource.id}>
+                      <code>&lt;{resource.token_label}&gt;</code>
+                      {resource.label !== resource.token_label && ` — ${resource.label}`}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <textarea
               rows={10}
               value={ideaText}

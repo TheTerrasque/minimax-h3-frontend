@@ -288,6 +288,7 @@ export function ProjectBoard() {
         <ScriptPlanModal
           projectId={projectId}
           hasExistingClips={!!project.data?.clips.length}
+          projectResources={project.data?.resources ?? []}
           onClose={() => setPlanModalOpen(false)}
         />
       )}

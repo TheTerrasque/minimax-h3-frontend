@@ -27,13 +27,19 @@ For each scene, set:
 
 - `"mode"`: `"t2v"` for a fresh shot that doesn't need to continue
   another one, or `"i2v"` when this scene is meant to continue directly
-  from the immediately preceding scene as one unbroken take.
-- `"continues_previous"`: `true` only when `mode` is `"i2v"` AND this
-  scene directly continues the shot immediately before it with no cut.
-  Always `false` for the very first scene, and always `false` whenever
-  there's a cut to a new shot/angle/moment.
+  from the immediately preceding scene as one unbroken take. (If
+  reference tokens are listed as available to you, ignore this bullet —
+  see section 3.5 below instead: every scene uses `"r2v"` there.)
+- `"continues_previous"`: `true` only when `mode` supports continuing
+  (`"i2v"` or `"r2v"`) AND this scene directly continues the shot
+  immediately before it with no cut. Always `false` for the very first
+  scene, and always `false` whenever there's a cut to a new
+  shot/angle/moment.
 
-## 3. Writing each scene's prompt
+## 3. Writing each scene's prompt (no shared references)
+
+This section applies when no reference tokens are listed as available to
+you — see section 3.5 instead if they are.
 
 Write the `"prompt"` field for every scene — regardless of `mode` —
 using the house prompt-writing guide included below, but with one
@@ -50,6 +56,33 @@ Use any shared project context you're given (setting, characters, tone)
 to keep every scene consistent — but only actually describe what's
 visible/audible *in that specific scene*, don't restate the shared
 context verbatim.
+
+## 3.5 Writing each scene's prompt (shared references available)
+
+This section applies instead of section 3 whenever reference tokens
+(e.g. `<Picture 1>`, `<Video 1>`, `<Audio 1>`) are listed as available to
+you below — that means this project has shared reference assets attached.
+In that case:
+
+- Every scene's `"mode"` must be `"r2v"`.
+- Every scene's `"prompt"` must follow the **reference** guide's own full
+  structure (its six sections: `subject_definitions`, `summary`,
+  `retention_analysis`, `detailed_description`, `overall_soundscape`,
+  `non_diegetic_music`) instead of section 3's simplified three-field
+  form — use it in full even for a scene that ends up not drawing on any
+  reference (just keep `subject_definitions`/`retention_analysis` empty
+  or trivial for that scene).
+- Use a listed reference token wherever a scene genuinely draws on it (a
+  character's appearance, a voice, an establishing shot's style, etc.) —
+  never force one in where it doesn't actually apply, and never invent a
+  token that isn't listed.
+- The reference list may include a short description in parentheses
+  purely so you understand what each one depicts (e.g. `Picture 1
+  (Alice — character sheet)`) — when you actually use one, write only
+  the bare token in your prompt text (`<Picture 1>`), never the
+  description.
+- `"continues_previous"` still works the same way as section 2 describes
+  — r2v scenes can chain into each other just like i2v ones.
 
 ## 4. Output format
 

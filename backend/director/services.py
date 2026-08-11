@@ -7,6 +7,7 @@ sections for the full design this implements.
 
 from __future__ import annotations
 
+import re
 import uuid
 
 from django.core.files.base import ContentFile
@@ -27,12 +28,24 @@ _VIDEO_MODES = (Mode.TEXT_TO_VIDEO, Mode.IMAGE_TO_VIDEO, Mode.REFERENCE_TO_VIDEO
 
 _ACTIVE_JOB_STATUSES = {GenerationJob.Status.QUEUED, GenerationJob.Status.PROCESSING}
 
-# Modes plan_scenes() (and a human editing its output) may propose -- r2v is
-# deliberately excluded here even though it's in CONTINUATION_CAPABLE_MODES:
-# it needs actual reference assets to be meaningful, which the planning
-# guide never asks the LLM to invent (see DIRECTOR_PLAN_GUIDE_en.md), so
-# there's no legitimate way for a planned scene to land on it.
+# Modes plan_scenes() (and a human editing its output) may propose when a
+# project has no shared references -- r2v is deliberately excluded here
+# even though it's in CONTINUATION_CAPABLE_MODES: without a reference to
+# actually point at, there's no legitimate way for a planned scene to land
+# on it. When the project DOES have shared references, normalize_planned_
+# scenes() forces every scene to r2v instead of consulting this set at all
+# -- see its require_reference_mode param.
 _PLANNABLE_MODES = {Mode.TEXT_TO_VIDEO, Mode.IMAGE_TO_VIDEO}
+
+# <Picture N>/<Video N>/<Audio N> -- matches ReferenceAsset.label's own
+# token convention. Used by renumber_clip_reference_tokens() below to keep
+# a Clip's written prompt text in sync with what a token number actually
+# means after a ProjectResource of the same kind is added/removed.
+_REFERENCE_TOKEN_PATTERNS = {
+    ReferenceAsset.Kind.IMAGE: (re.compile(r"<Picture (\d+)>"), "Picture"),
+    ReferenceAsset.Kind.VIDEO: (re.compile(r"<Video (\d+)>"), "Video"),
+    ReferenceAsset.Kind.AUDIO: (re.compile(r"<Audio (\d+)>"), "Audio"),
+}
 
 
 class RenderConflict(Exception):
@@ -176,6 +189,55 @@ def _combined_references(clip: Clip) -> list[ProjectResource | ReferenceAsset]:
             item.order = len(project_items) + offset
             combined.append(item)
     return combined
+
+
+def renumber_clip_reference_tokens(project: Project, kind: str, old_project_count: int, new_project_count: int) -> None:
+    """Rewrites every "<Picture N>"/"<Video N>"/"<Audio N>" token of `kind`
+    in every Clip's prompt/improved_prompt so it keeps pointing at the same
+    underlying reference after a ProjectResource of this kind is added or
+    removed (see director/api.py's project_resources()/resource_detail()).
+    _combined_references() puts this project's shared resources of a kind
+    before any Clip's own references of that kind, so both a surviving
+    project resource's own token number (shared across every clip) and the
+    point where a clip's *own* references start shift whenever the
+    project's resource count for that kind changes -- a uniform delta
+    handles both: a token number at or below whichever count is smaller
+    (the surviving overlap) is untouched, everything above it shifts by
+    the same delta, which is exactly right whether a resource was appended
+    (nothing below shifts) or removed from the middle (everything after it
+    shifts down by one, including subsequent project resources).
+
+    Purely text-based -- a written prompt has no structured link to "which
+    reference this number means", only the literal token -- so this can't
+    fix a mention of the one resource actually being deleted (there's
+    nothing left to remap it to, and it may now coincidentally collide
+    with another resource's new number); every other still-valid mention
+    is kept correct. Doesn't mark anything dirty itself -- the caller
+    already does via mark_project_dirty() for the resource add/remove
+    itself.
+    """
+    delta = new_project_count - old_project_count
+    if delta == 0:
+        return
+    pattern, word = _REFERENCE_TOKEN_PATTERNS[kind]
+    boundary = min(old_project_count, new_project_count)
+
+    def remap(match: re.Match) -> str:
+        n = int(match.group(1))
+        return f"<{word} {n}>" if n <= boundary else f"<{word} {n + delta}>"
+
+    for clip in project.clips.all():
+        update_fields = []
+        for field in ("prompt", "improved_prompt"):
+            text = getattr(clip, field)
+            if not text:
+                continue
+            new_text = pattern.sub(remap, text)
+            if new_text != text:
+                setattr(clip, field, new_text)
+                update_fields.append(field)
+        if update_fields:
+            clip.save(update_fields=update_fields)
 
 
 def _chain_run_prefix_clips(clip: Clip) -> list[Clip]:
@@ -434,7 +496,7 @@ def mark_project_dirty(project: Project) -> None:
     project.clips.update(needs_render=True)
 
 
-def normalize_planned_scenes(raw_scenes) -> list[dict]:
+def normalize_planned_scenes(raw_scenes, *, require_reference_mode: bool = False) -> list[dict]:
     """Coerces integrations.llm.plan_scenes()'s raw reply -- or a scene list
     a user has since hand-edited in the preview step -- into the exact
     shape apply_planned_scenes() and the API's response both expect:
@@ -448,6 +510,13 @@ def normalize_planned_scenes(raw_scenes) -> list[dict]:
     continue when this is the sequence's very first scene) is enforced by
     apply_planned_scenes() instead, since that depends on whether this is
     appended after existing clips.
+
+    require_reference_mode: True once the target project has shared
+    resources (see project_requires_reference_mode()) -- every clip in such
+    a project must be r2v, so every scene's mode is forced to r2v here
+    regardless of what the LLM said (llm.plan_scenes() is told to write
+    r2v-structured prompts and use the project's reference tokens in this
+    case, but the mode field itself isn't trusted to come back right).
     """
     scenes = []
     for raw in raw_scenes if isinstance(raw_scenes, list) else []:
@@ -456,7 +525,10 @@ def normalize_planned_scenes(raw_scenes) -> list[dict]:
         prompt = str(raw.get("prompt", "")).strip()
         if not prompt:
             continue
-        mode = raw.get("mode") if raw.get("mode") in _PLANNABLE_MODES else Mode.TEXT_TO_VIDEO
+        if require_reference_mode:
+            mode = Mode.REFERENCE_TO_VIDEO
+        else:
+            mode = raw.get("mode") if raw.get("mode") in _PLANNABLE_MODES else Mode.TEXT_TO_VIDEO
         scenes.append(
             {
                 "mode": mode,
@@ -476,13 +548,7 @@ def apply_planned_scenes(project: Project, scenes, *, replace: bool) -> list[Cli
     director/api.py's clips() POST handler, which resolves the same way for
     a manually-created clip). Doesn't itself trigger any render.
     """
-    if project_requires_reference_mode(project):
-        raise PlanError(
-            "This project has shared references -- every clip must be a reference clip, which "
-            '"Generate from script" doesn\'t support yet. Add clips manually instead.'
-        )
-
-    normalized = normalize_planned_scenes(scenes)
+    normalized = normalize_planned_scenes(scenes, require_reference_mode=project_requires_reference_mode(project))
     if not normalized:
         raise PlanError("No usable scenes to apply.")
 

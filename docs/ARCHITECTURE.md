@@ -632,16 +632,26 @@ single `GenerationJob`-backed render, positioned by `order`.
   only actually reach a render through `MiniMaxH3ReferenceToVideo`'s
   `ref_image_N`/etc inputs, so once a project has any, every `Clip` in it
   must be `r2v` (`director/services.py::project_requires_reference_mode()`,
-  enforced by `clips()`/`project_resources()` POST and by `plan_project()`
-  refusing to run at all for such a project — script planning never
-  proposes r2v, see below). At render time,
+  enforced by `clips()`/`project_resources()` POST). At render time,
   `_build_job_for_clip()` feeds `_combined_references()`'s list into the
   new `GenerationJob`: the project's resources first (so a `<Picture N>`
   token means the same thing in every clip's prompt), then the clip's own
   `ClipReferenceAsset`s appended after, per kind —
   `ClipReferenceAsset.label`'s displayed token is offset by the project's
   own resource count of that kind so what the UI shows always matches
-  what actually gets wired in.
+  what actually gets wired in. Both `clips()`/`clip_references()`/
+  `project_resources()` POST validate the *combined* count (shared +
+  a clip's own) against the mode's real cap (9 images/3 audio/3 video for
+  r2v), not just each side independently — a shared resource add is
+  rejected if it would push any existing clip over the limit.
+  `director/services.py::renumber_clip_reference_tokens()` keeps every
+  clip's written prompt text in sync whenever a shared resource is added
+  or removed: since a written prompt only has the literal `<Picture N>`
+  number to say "which reference this is" (no structured link back to a
+  specific row), adding/removing a resource shifts where every clip's own
+  references start numbering from, so this rewrites those token mentions
+  in place. It can't recover a mention of the one resource actually being
+  deleted (nothing left to remap it to) — everything else stays correct.
 - **Render orchestration** — `render_clip()` walks backward to find the
   head of a dirty continuation run and enqueues only that job;
   `director/signals.py`'s `on_job_finished` receiver (listening to
@@ -665,11 +675,15 @@ single `GenerationJob`-backed render, positioned by `order`.
   the — possibly edited — scene list, `replace: bool`) calls
   `apply_planned_scenes()` to actually create `Clip` rows, appended after
   the project's existing clips by default or replacing them entirely.
-  Applying never itself triggers a render. Refuses to run at all
-  (`plan_project()`/`apply_planned_scenes()` both check) once a project
-  has shared resources — see "Shared resources require reference mode"
-  above; the planning guide never proposes r2v, so there's no way for a
-  generated scene to satisfy that requirement.
+  Applying never itself triggers a render. When the project has shared
+  resources (see above), both `plan_scenes()` and `normalize_
+  planned_scenes()` take a `require_reference_mode` flag: the former
+  swaps in the reference variant of the house guide and tells the model
+  every scene must be r2v and should use the listed reference tokens
+  (`<Picture N>` etc., each with its human label parenthesized as
+  context, e.g. `Picture 1 (Alice — character sheet)`) where relevant;
+  the latter then force-sets every scene's mode to r2v regardless of what
+  the LLM actually wrote, since that field isn't trusted either way.
 - **Assembly/export** — `POST /api/director/projects/<id>/assemble/`
   requires every clip to be rendered and clean, then concatenates their
   videos in board order via `integrations/assembly.py::concat_videos()`
@@ -708,8 +722,11 @@ single `GenerationJob`-backed render, positioned by `order`.
   reference-labels list passed alongside — only a duration slider remains
   here; quality/aspect ratio moved to the board, see above — reference
   slots, render/cancel/delete). `ScriptPlanModal` is the two-step
-  "propose, then confirm" UI for the LLM planning endpoints above. Routes:
-  `/director` and `/director/:projectId` in `App.tsx`.
+  "propose, then confirm" UI for the LLM planning endpoints above —
+  lists the project's shared references (token + label) up front when
+  any exist, so the user knows what's available to mention in their
+  idea text even though the LLM already gets the same list automatically.
+  Routes: `/director` and `/director/:projectId` in `App.tsx`.
 
 ## Frontend
 

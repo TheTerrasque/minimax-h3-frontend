@@ -320,12 +320,38 @@ def project_resources(request, project_id: int):
             },
             status=400,
         )
+
+    limits = {
+        ProjectResource.Kind.IMAGE: _MAX_REFERENCE_IMAGES,
+        ProjectResource.Kind.AUDIO: _MAX_REFERENCE_AUDIO,
+        ProjectResource.Kind.VIDEO: _MAX_REFERENCE_VIDEO,
+    }[kind]
+    max_for_kind = limits[Mode.REFERENCE_TO_VIDEO]
+    old_count = project.resources.filter(kind=kind).count()
+    # Every clip in the project is r2v at this point (checked above), so
+    # they all share the same limit -- find the clip that already has the
+    # most of its own references of this kind, since that's the one a new
+    # shared resource would push over first.
+    worst_clip_count = max((c.references.filter(kind=kind).count() for c in project.clips.all()), default=0)
+    if old_count + 1 + worst_clip_count > max_for_kind:
+        return Response(
+            {
+                "error": f"Reference clips support at most {max_for_kind} {kind} reference(s) total "
+                f"(shared + a clip's own) -- adding this would put at least one clip over that limit."
+            },
+            status=400,
+        )
+
     file = request.FILES.get("file")
     if file is None:
         return Response({"error": "file is required."}, status=400)
     label = request.data.get("label", "")
-    order = project.resources.filter(kind=kind).count()
-    resource = ProjectResource.objects.create(project=project, kind=kind, order=order, file=file, label=label)
+    resource = ProjectResource.objects.create(project=project, kind=kind, order=old_count, file=file, label=label)
+    # This resource's own new position is stable (appended at the end of
+    # its kind), but every clip's own references of this kind just moved
+    # one slot later in the combined numbering (see _combined_references())
+    # -- keep any prompt text mentioning them pointing at the right thing.
+    services.renumber_clip_reference_tokens(project, kind, old_count, old_count + 1)
     services.mark_project_dirty(project)
     return Response(_serialize_resource(resource), status=201)
 
@@ -339,8 +365,11 @@ def project_resources(request, project_id: int):
 def resource_detail(request, resource_id: int):
     resource = get_object_or_404(ProjectResource, id=resource_id, project__user=request.user)
     project = resource.project
+    kind = resource.kind
+    old_count = project.resources.filter(kind=kind).count()
     resource.file.delete(save=False)
     resource.delete()
+    services.renumber_clip_reference_tokens(project, kind, old_count, old_count - 1)
     services.mark_project_dirty(project)
     return Response(status=204)
 
@@ -428,13 +457,23 @@ def clips(request, project_id: int):
     reference_images = request.FILES.getlist("reference_images")
     reference_audio = request.FILES.getlist("reference_audio")
     reference_video = request.FILES.getlist("reference_video")
-    for files, limits, label in (
-        (reference_images, _MAX_REFERENCE_IMAGES, "image"),
-        (reference_audio, _MAX_REFERENCE_AUDIO, "audio"),
-        (reference_video, _MAX_REFERENCE_VIDEO, "video"),
+    for files, limits, kind, label in (
+        (reference_images, _MAX_REFERENCE_IMAGES, ReferenceAsset.Kind.IMAGE, "image"),
+        (reference_audio, _MAX_REFERENCE_AUDIO, ReferenceAsset.Kind.AUDIO, "audio"),
+        (reference_video, _MAX_REFERENCE_VIDEO, ReferenceAsset.Kind.VIDEO, "video"),
     ):
-        if len(files) > limits[mode]:
-            return Response({"error": f"{Mode(mode).label} supports at most {limits[mode]} {label} reference(s)."}, status=400)
+        # This project's shared resources (if any -- only possible when
+        # mode is r2v, see the gate above) share the same per-kind budget
+        # as this clip's own references -- see _combined_references().
+        project_count = project.resources.filter(kind=kind).count()
+        if project_count + len(files) > limits[mode]:
+            return Response(
+                {
+                    "error": f"{Mode(mode).label} supports at most {limits[mode]} {label} reference(s) "
+                    f"total (this project already provides {project_count} shared)."
+                },
+                status=400,
+            )
 
     last_order = project.clips.order_by("-order").values_list("order", flat=True).first()
     next_order = 0 if last_order is None else last_order + 1
@@ -565,10 +604,17 @@ def clip_references(request, clip_id: int):
         ReferenceAsset.Kind.VIDEO: _MAX_REFERENCE_VIDEO,
     }[kind]
     max_for_mode = limits[clip.mode]
+    # This project's shared resources (if any) share the same per-kind
+    # budget as this clip's own references -- see _combined_references().
+    project_count = clip.project.resources.filter(kind=kind).count()
     existing_count = clip.references.filter(kind=kind).count()
-    if existing_count >= max_for_mode:
+    if project_count + existing_count >= max_for_mode:
         return Response(
-            {"error": f"{Mode(clip.mode).label} supports at most {max_for_mode} {kind} reference(s)."}, status=400
+            {
+                "error": f"{Mode(clip.mode).label} supports at most {max_for_mode} {kind} reference(s) "
+                f"total (this project already provides {project_count} shared)."
+            },
+            status=400,
         )
 
     ref = ClipReferenceAsset.objects.create(clip=clip, kind=kind, order=existing_count, file=file)
@@ -697,7 +743,8 @@ def cancel_clip(request, clip_id: int):
     summary="Generate a proposed clip sequence from a script/idea (preview only, not saved)",
     description="Turns a pasted script/idea into an ordered list of proposed scenes via the "
     "configured LLM -- nothing is created yet. Review/edit the result client-side, then POST it "
-    "to plan/apply/ to actually create clips from it.",
+    "to plan/apply/ to actually create clips from it. If the project has shared references, every "
+    "proposed scene is forced to be a reference clip and is written to use them where relevant.",
     request=PlanRequestSerializer,
     responses={
         200: PlanResponseSerializer,
@@ -713,28 +760,32 @@ def plan_project(request, project_id: int):
     project = _get_project(request, project_id)
     if not settings.LLM_ENABLED:
         return Response({"error": "No LLM is configured."}, status=503)
-    if services.project_requires_reference_mode(project):
-        return Response(
-            {
-                "error": "This project has shared references -- \"Generate from script\" doesn't "
-                "support reference clips yet. Add clips manually instead."
-            },
-            status=400,
-        )
 
     idea_text = request.data.get("idea_text", "")
     if not idea_text.strip():
         return Response({"error": "idea_text is required."}, status=400)
 
-    resource_labels = [r.label or r.token_label for r in project.resources.all()]
+    require_reference_mode = services.project_requires_reference_mode(project)
+    # token_label (not label) -- the LLM needs the literal token it must
+    # write verbatim; a human label like "Alice -- character sheet" is
+    # appended only as parenthetical context, see llm.plan_scenes()'s
+    # require_reference_mode handling and DIRECTOR_PLAN_GUIDE_en.md's
+    # section 3.5.
+    resource_labels = [
+        f"{r.token_label} ({r.label.strip()})" if r.label.strip() else r.token_label
+        for r in project.resources.all()
+    ]
     try:
         raw_scenes = llm.plan_scenes(
-            idea_text, resource_labels=resource_labels, extra_context=project.overarching_prompt
+            idea_text,
+            resource_labels=resource_labels,
+            extra_context=project.overarching_prompt,
+            require_reference_mode=require_reference_mode,
         )
     except llm.LLMError as exc:
         return Response({"error": str(exc)}, status=502)
 
-    scenes = services.normalize_planned_scenes(raw_scenes)
+    scenes = services.normalize_planned_scenes(raw_scenes, require_reference_mode=require_reference_mode)
     if not scenes:
         return Response({"error": "The AI didn't return any usable scenes -- try rephrasing."}, status=502)
     return Response({"scenes": scenes})
