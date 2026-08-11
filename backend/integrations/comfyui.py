@@ -261,17 +261,31 @@ def check_for_error(history_record: dict[str, Any]) -> None:
 def get_object_info(class_type: str) -> dict[str, Any] | None:
     """GET /object_info/{class_type} -- ComfyUI's own registry of installed
     node types. Returns that node's schema dict if it's registered, None if
-    not. Confirmed live against a real instance: ComfyUI answers 200 with an
-    empty {} for an unknown class_type -- it never 404s here, so an empty
-    body (not the HTTP status) is the actual "not installed" signal.
+    not (including when ComfyUI can't be reached at all -- a network
+    failure isn't meaningfully different from "can't confirm this is
+    available" for either caller below, and every caller already treats a
+    None return as "not available/not installed"). Confirmed live against a
+    real instance: ComfyUI answers 200 with an empty {} for an unknown
+    class_type -- it never 404s here, so an empty body (not the HTTP
+    status) is the actual "not installed" signal.
 
-    Purely a diagnostic (see generation/management/commands/check_extras.py,
-    extras.md) -- never called from the actual render path (tasks.py), which
-    finds out whether a node exists the same way it always has: ComfyUI's
-    own /prompt validation rejects an unknown node type with a clear error.
+    Originally purely a diagnostic (generation/management/commands/
+    check_extras.py, extras.md) -- tasks.py's actual render path still
+    finds out whether a node exists the same way it always has, via
+    ComfyUI's own /prompt validation rejecting an unknown node type with a
+    clear error. Now also called from integrations/motion_context.py's
+    is_available(), reached from generation/api.py's config() view on
+    every page load -- confirmed live: an unhandled ConnectionError here
+    when ComfyUI was briefly unreachable took down /api/config/ (and so
+    the whole frontend) with a 500, which is why this catches request
+    failures instead of letting them propagate like a real page-breaking
+    error would.
     """
-    resp = requests.get(f"{_base_url()}/object_info/{class_type}", timeout=_request_timeout())
-    resp.raise_for_status()
+    try:
+        resp = requests.get(f"{_base_url()}/object_info/{class_type}", timeout=_request_timeout())
+        resp.raise_for_status()
+    except requests.exceptions.RequestException:
+        return None
     return resp.json().get(class_type)
 
 
