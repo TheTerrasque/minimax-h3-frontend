@@ -67,6 +67,13 @@ export interface Project {
   quality_label: string;
   created_at: string;
   updated_at: string;
+  // Only set by the list endpoint (useDirectorProjects) -- null on a
+  // single-project fetch (useDirectorProject), which has the real `clips`
+  // array to compute the same things from directly if ever needed.
+  clip_count: number | null;
+  dirty_count: number | null;
+  active_count: number | null;
+  eta_seconds: number | null;
 }
 
 export interface ProjectDetail extends Project {

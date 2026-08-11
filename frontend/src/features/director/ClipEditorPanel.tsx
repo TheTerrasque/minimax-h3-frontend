@@ -38,6 +38,13 @@ interface ClipEditorPanelProps {
   // with the rest of the project (see backend integrations/llm.py's
   // _extra_context_note()).
   overarchingPrompt: string;
+  // A short, human-readable summary of every clip before this one in the
+  // sequence (mode + raw prompt, truncated) -- built by ProjectBoard from
+  // the full clip list, since ClipEditorPanel only ever sees one Clip at a
+  // time. Given to AI refine/chat as more extra_context so it can keep
+  // this clip's prompt consistent with what actually happens earlier in
+  // the project, not just the shared overarching_prompt.
+  previousClipsContext: string;
   // <Picture N>/<Video N>/<Audio N> tokens for the project's own shared
   // resources (see ProjectResourcesPanel) -- these render before this
   // clip's own references (see backend director/services.py's
@@ -52,6 +59,7 @@ export function ClipEditorPanel({
   clip,
   isFirstClip,
   overarchingPrompt,
+  previousClipsContext,
   projectResourceLabels,
   onClose,
 }: ClipEditorPanelProps) {
@@ -95,6 +103,7 @@ export function ClipEditorPanel({
 
   const isBusy = clip.current_job_status === "queued" || clip.current_job_status === "processing";
   const failed = clip.current_job_status === "done" && !clip.video_url;
+  const combinedExtraContext = [overarchingPrompt, previousClipsContext].filter(Boolean).join("\n\n");
 
   async function savePrompt() {
     if (promptDraft === clip.prompt) return;
@@ -107,7 +116,8 @@ export function ClipEditorPanel({
       mode: clip.mode,
       rawPrompt: promptDraft,
       referenceLabels,
-      extraContext: overarchingPrompt,
+      extraContext: combinedExtraContext,
+      isContinuation: clip.continues_previous,
     });
     await updateClip.mutateAsync({ projectId, clipId: clip.id, improvedPrompt: result.improved_prompt });
   }
@@ -126,7 +136,8 @@ export function ClipEditorPanel({
         rawPrompt: promptDraft,
         improvedPrompt: clip.improved_prompt,
         referenceLabels,
-        extraContext: overarchingPrompt,
+        extraContext: combinedExtraContext,
+        isContinuation: clip.continues_previous,
       });
       setChatMessages((prev) => [...prev, reply]);
     } catch {

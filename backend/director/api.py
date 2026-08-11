@@ -12,6 +12,7 @@ import tempfile
 from django.conf import settings
 from django.core.files.base import ContentFile
 from django.db import transaction
+from django.db.models import Count, Q, Sum
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from drf_spectacular.utils import OpenApiResponse, extend_schema
@@ -85,6 +86,16 @@ class ProjectSerializer(serializers.Serializer):
     quality_label = serializers.CharField(help_text="The shared quality tier every Clip's own preset is resolved from.")
     created_at = serializers.DateTimeField()
     updated_at = serializers.DateTimeField()
+    clip_count = serializers.IntegerField(
+        allow_null=True, help_text="Only set on the list endpoint (GET /projects/), null on a single-project fetch."
+    )
+    dirty_count = serializers.IntegerField(allow_null=True, help_text="How many of clip_count still need_render.")
+    active_count = serializers.IntegerField(allow_null=True, help_text="How many clips are currently queued/processing.")
+    eta_seconds = serializers.IntegerField(
+        allow_null=True,
+        help_text="Sum of estimated_render_seconds over every dirty clip's duration -- a rough "
+        "\"time to finish this project if rendered now\", not a live queue position.",
+    )
 
 
 class ProjectDetailSerializer(ProjectSerializer):
@@ -115,6 +126,10 @@ class ApplyPlanRequestSerializer(serializers.Serializer):
         default=False,
         help_text="Delete all existing clips first instead of appending after them.",
     )
+
+
+class ContinuityCheckResponseSerializer(serializers.Serializer):
+    report = serializers.CharField(help_text="The AI's plain-text (markdown-ish) review, unparsed.")
 
 
 def _serialize_resource(resource: ProjectResource) -> dict:
@@ -168,6 +183,15 @@ def _serialize_project(project: Project, *, detail: bool = False) -> dict:
         "quality_label": project.quality_label,
         "created_at": project.created_at,
         "updated_at": project.updated_at,
+        # Only present (non-None) when `project` came from projects()' GET
+        # queryset, which annotates these -- see that view. A plain
+        # Project.objects.get()/.filter() elsewhere (project_detail() etc.)
+        # has no such attributes, so getattr's default keeps this branch
+        # from blowing up there.
+        "clip_count": getattr(project, "clip_count", None),
+        "dirty_count": getattr(project, "dirty_count", None),
+        "active_count": getattr(project, "active_count", None),
+        "eta_seconds": getattr(project, "eta_seconds", None),
     }
     if detail:
         data["resources"] = [_serialize_resource(r) for r in project.resources.all()]
@@ -201,7 +225,23 @@ def _get_clip(request, clip_id: int) -> Clip:
 @api_view(["GET", "POST"])
 def projects(request):
     if request.method == "GET":
-        return Response([_serialize_project(p) for p in Project.objects.filter(user=request.user)])
+        # filter=Q(...) on each aggregate is conditional aggregation (SQL
+        # CASE WHEN inside the aggregate function) rather than a separate
+        # JOIN per annotation, so combining Count/Sum here over the same
+        # `clips` relation doesn't fan out/double-count -- see Django's
+        # aggregation docs on filtered aggregates.
+        active_statuses = [GenerationJob.Status.QUEUED, GenerationJob.Status.PROCESSING]
+        qs = Project.objects.filter(user=request.user).annotate(
+            clip_count=Count("clips", distinct=True),
+            dirty_count=Count("clips", filter=Q(clips__needs_render=True), distinct=True),
+            active_count=Count(
+                "clips", filter=Q(clips__current_job__status__in=active_statuses), distinct=True
+            ),
+            eta_seconds=Sum(
+                "clips__duration__estimated_render_seconds", filter=Q(clips__needs_render=True)
+            ),
+        )
+        return Response([_serialize_project(p) for p in qs])
 
     title = request.data.get("title", "")
     overarching_prompt = request.data.get("overarching_prompt", "")
@@ -717,6 +757,35 @@ def render_all_dirty(request, project_id: int):
     return Response([_serialize_clip(c) for c in project.clips.select_related("current_job")])
 
 
+def _cancel_clip_job(clip: Clip) -> bool:
+    """Cancels `clip`'s in-flight job, if it has one -- a queued job is
+    cancelled directly, a processing one is flagged and stopped
+    best-effort (same semantics as generation/api.py's cancel_job). Also
+    clears render_chain_target so an in-flight chain stops advancing past
+    this clip. Returns False (no-op) if there was nothing to cancel, so
+    callers can tell a real cancellation from a skip -- see cancel_clip()'s
+    409 and cancel_all()'s summary count.
+    """
+    job = clip.current_job
+    if job is None or job.status not in (GenerationJob.Status.QUEUED, GenerationJob.Status.PROCESSING):
+        return False
+
+    with transaction.atomic():
+        Clip.objects.filter(pk=clip.pk).update(render_chain_target=None)
+        if job.status == GenerationJob.Status.QUEUED:
+            job.status = GenerationJob.Status.CANCELLED
+            job.error_message = "Cancelled by user."
+            job.finished_at = timezone.now()
+            job.save(update_fields=["status", "error_message", "finished_at"])
+        else:
+            job.cancel_requested = True
+            job.save(update_fields=["cancel_requested"])
+
+    if job.status == GenerationJob.Status.PROCESSING and job.comfyui_prompt_id:
+        comfyui.cancel_prompt(job.comfyui_prompt_id)
+    return True
+
+
 @extend_schema(
     summary="Cancel a clip's in-flight render",
     description="Same semantics as generation/api.py's cancel_job -- a queued job is cancelled "
@@ -732,26 +801,57 @@ def render_all_dirty(request, project_id: int):
 @api_view(["POST"])
 def cancel_clip(request, clip_id: int):
     clip = _get_clip(request, clip_id)
-    job = clip.current_job
-    if job is None or job.status not in (GenerationJob.Status.QUEUED, GenerationJob.Status.PROCESSING):
+    if not _cancel_clip_job(clip):
         return Response({"error": "This clip isn't queued or processing -- nothing to cancel."}, status=409)
-
-    with transaction.atomic():
-        Clip.objects.filter(pk=clip.pk).update(render_chain_target=None)
-        if job.status == GenerationJob.Status.QUEUED:
-            job.status = GenerationJob.Status.CANCELLED
-            job.error_message = "Cancelled by user."
-            job.finished_at = timezone.now()
-            job.save(update_fields=["status", "error_message", "finished_at"])
-        else:
-            job.cancel_requested = True
-            job.save(update_fields=["cancel_requested"])
-
-    if job.status == GenerationJob.Status.PROCESSING and job.comfyui_prompt_id:
-        comfyui.cancel_prompt(job.comfyui_prompt_id)
-
     clip.refresh_from_db()
     return Response(_serialize_clip(clip))
+
+
+@extend_schema(
+    summary="Cancel every in-flight render in a project",
+    description="Cancels every clip currently queued or processing, and clears every clip's "
+    "pending chain-render target project-wide -- stops \"Render all dirty\" mid-flight, including "
+    "any chain still auto-advancing. Clips that were already idle are left untouched (not an "
+    "error -- this is a broad \"stop everything\" action, not a precise one).",
+    responses={200: ClipSerializer(many=True), 404: OpenApiResponse(description="Not found.")},
+    tags=["director"],
+)
+@api_view(["POST"])
+def cancel_all(request, project_id: int):
+    project = _get_project(request, project_id)
+    for clip in project.clips.select_related("current_job"):
+        _cancel_clip_job(clip)
+    return Response([_serialize_clip(c) for c in project.clips.select_related("current_job")])
+
+
+@extend_schema(
+    summary="Ask the AI to review every clip's prompt for continuity/consistency issues",
+    description="Sends every clip's prompt (in order, with mode/continues_previous) to the "
+    "configured LLM and returns its plain-text report -- doesn't change anything, purely "
+    "informational.",
+    responses={
+        200: ContinuityCheckResponseSerializer,
+        404: OpenApiResponse(description="Not found."),
+        502: OpenApiResponse(ErrorResponseSerializer, description="The LLM request itself failed."),
+        503: OpenApiResponse(ErrorResponseSerializer, description="No LLM is configured."),
+    },
+    tags=["director"],
+)
+@api_view(["POST"])
+def check_continuity(request, project_id: int):
+    project = _get_project(request, project_id)
+    if not settings.LLM_ENABLED:
+        return Response({"error": "No LLM is configured."}, status=503)
+
+    clips = [
+        {"order": c.order, "mode": c.mode, "continues_previous": c.continues_previous, "prompt": c.prompt}
+        for c in project.clips.order_by("order")
+    ]
+    try:
+        report = llm.check_project_continuity(project.overarching_prompt, clips)
+    except llm.LLMError as exc:
+        return Response({"error": str(exc)}, status=502)
+    return Response({"report": report})
 
 
 @extend_schema(

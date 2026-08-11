@@ -20,8 +20,16 @@ below), each covering the next beat of that same continuous take.
 Two adjacent scenes can either be a hard cut (a new, independent shot)
 or a direct continuation (the same shot keeps rolling — motion and audio
 flow seamlessly across the boundary, no cut). This app splices real
-motion/audio continuity in automatically at render time; you never write
-anything about it in the prompt text itself.
+motion/audio continuity in automatically at render time — you never
+write anything about the *mechanism* in the prompt text itself — but
+when `"continues_previous": true`, the prompt's own *content* still has
+to read as a seamless continuation: keep the same camera angle/framing,
+setting, and characters the previous scene established, and describe
+only how the action continues or develops from where it left off. Don't
+jump to a different angle, location, or unrelated action on a scene
+you've flagged as continuing — that's a hard cut wearing a
+`continues_previous` label, and the render won't actually look
+continuous just because the flag is set.
 
 For each scene, set:
 

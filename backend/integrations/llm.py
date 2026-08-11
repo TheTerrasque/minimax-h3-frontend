@@ -72,8 +72,16 @@ FINAL_PROMPT_FENCE = "final-prompt"
 # Style guidance baked into both default system prompts below, independent
 # of whatever structure the mode's house guide itself defines -- written
 # prompts should read clearly and spell things out rather than leaving them
-# for the render model to infer.
-_PROMPT_STYLE_NOTE = "Written prompts should be easy to read, and explicit rather than implicit."
+# for the render model to infer. The dialogue clause exists because a
+# prompt that implies speech without giving the words (e.g. "she comments
+# on it") lets the render model invent its own lines -- confirmed against
+# a real render that did exactly that.
+_PROMPT_STYLE_NOTE = (
+    "Written prompts should be easy to read, and explicit rather than implicit. If a character "
+    "speaks, sings, or narrates, always write their exact words -- never describe that they "
+    "\"say something\"/\"comment on\"/etc. without giving the words themselves, since the render "
+    "model will invent its own dialogue rather than staying silent."
+)
 
 
 def is_configured() -> bool:
@@ -95,6 +103,29 @@ def _reference_note(reference_labels: list[str] | None) -> str:
         f"Available reference labels to use verbatim: {', '.join(reference_labels)}."
         if reference_labels
         else "No reference assets are attached; do not invent <Picture N>/<Video N>/<Audio N> labels."
+    )
+
+
+def _continuation_note(is_continuation: bool) -> str:
+    """Director Mode's only other hook into this module beyond extra_context
+    (see improve_prompt()/chat_reply()'s is_continuation param) -- a clip
+    flagged "continues previous" splices in real motion/audio continuity
+    automatically at render time (see integrations/motion_context.py), but
+    that only wires up the technical mechanism; nothing told the LLM the
+    *prompt itself* should read as an unbroken continuation rather than a
+    fresh shot. Confirmed against a real render: an unstructured
+    continuation prompt produced a jump to a completely different camera
+    angle despite continues_previous being set.
+    """
+    if not is_continuation:
+        return ""
+    return (
+        "\n\nThis clip continues directly from the previous one in the sequence, as one unbroken "
+        "shot with no cut -- the render pipeline splices in real motion/audio continuity "
+        "automatically, but the prompt text itself must still read as a seamless continuation: "
+        "keep the same camera angle/framing, setting, and characters established by the previous "
+        "clip's action rather than introducing a new one, and describe only how the action "
+        "continues or develops from where it left off."
     )
 
 
@@ -211,6 +242,7 @@ def improve_prompt(
     duration_seconds: float | None = None,
     reference_images: list[tuple[bytes, str]] | None = None,
     extra_context: str | None = None,
+    is_continuation: bool = False,
 ) -> str:
     """One-shot rewrite of raw_prompt into MiniMax H3's expected prompt
     structure -- backs the "AI refine" button.
@@ -220,7 +252,8 @@ def improve_prompt(
     message as vision content parts, same as chat_reply(), but only when
     settings.LLM_VISION_ENABLED; a no-op plain-text request otherwise.
 
-    extra_context: see _extra_context_note().
+    extra_context: see _extra_context_note(). is_continuation: see
+    _continuation_note().
     """
     guide = _load_guide(mode)
     user_content: str | list[dict] = f"{_reference_note(reference_labels)}\n\nUser's raw prompt:\n{raw_prompt}"
@@ -236,7 +269,8 @@ def improve_prompt(
                 f"You rewrite user {_CONTENT_TYPE_BY_MODE[mode]} prompts to follow the house "
                 "prompt-writing guide below exactly. Output only the rewritten prompt, nothing else. "
                 f"{_PROMPT_STYLE_NOTE}"
-                f"{_duration_note(mode, duration_seconds)}{_extra_context_note(extra_context)}\n\n{guide}"
+                f"{_duration_note(mode, duration_seconds)}{_extra_context_note(extra_context)}"
+                f"{_continuation_note(is_continuation)}\n\n{guide}"
                 f"{_custom_system_note(settings.LLM_CUSTOM_SYSTEM_PROMPT_REFINE)}"
             ),
         },
@@ -254,6 +288,7 @@ def chat_reply(
     improved_prompt: str = "",
     duration_seconds: float | None = None,
     extra_context: str | None = None,
+    is_continuation: bool = False,
 ) -> str:
     """Multi-turn conversational prompt crafting -- backs the interactive
     chat feature. Entirely stateless: nothing here reads or writes
@@ -289,7 +324,8 @@ def chat_reply(
     (or no images), this is a no-op and the request is plain text, same as
     before.
 
-    extra_context: see _extra_context_note().
+    extra_context: see _extra_context_note(). is_continuation: see
+    _continuation_note().
     """
     guide = _load_guide(mode)
     draft_note = (
@@ -326,7 +362,8 @@ def chat_reply(
             "no commentary) whenever you use it. The rest of your reply (questions, suggestions, "
             "explanations) goes outside that block, as normal.\n\n"
             f"{_reference_note(reference_labels)}{draft_note}{improved_note}"
-            f"{_duration_note(mode, duration_seconds)}{_extra_context_note(extra_context)}\n\n{guide}"
+            f"{_duration_note(mode, duration_seconds)}{_extra_context_note(extra_context)}"
+            f"{_continuation_note(is_continuation)}\n\n{guide}"
             f"{_custom_system_note(settings.LLM_CUSTOM_SYSTEM_PROMPT_CHAT)}"
         ),
     }
@@ -404,9 +441,9 @@ def plan_scenes(
         {
             "role": "system",
             "content": (
-                f"{plan_guide}{mode_note}\n\n---\n\nHouse prompt-writing guide referenced above "
-                f"({guide_note}):\n\n{prompt_guide}\n\n{_reference_note(resource_labels)}"
-                f"{_extra_context_note(extra_context)}"
+                f"{_PROMPT_STYLE_NOTE}\n\n{plan_guide}{mode_note}\n\n---\n\nHouse prompt-writing "
+                f"guide referenced above ({guide_note}):\n\n{prompt_guide}\n\n"
+                f"{_reference_note(resource_labels)}{_extra_context_note(extra_context)}"
                 f"{_custom_system_note(settings.LLM_CUSTOM_SYSTEM_PROMPT_REFINE)}"
             ),
         },
@@ -421,3 +458,55 @@ def plan_scenes(
         return json.loads(reply)
     except json.JSONDecodeError as exc:
         raise LLMError(f"The AI's reply wasn't valid JSON: {exc}") from exc
+
+
+def check_project_continuity(overarching_prompt: str, clips: list[dict]) -> str:
+    """One-shot review of a Director project's full clip sequence, backing
+    "Check continuity" -- a plain-text report of likely problems for a
+    human to read, not a structured/automated fix. Deliberately free-form
+    prose (a bulleted list), not JSON: unlike plan_scenes(), nothing here
+    needs to be parsed back into Clip rows, so there's no reason to force a
+    schema onto what's really just an LLM's written opinion.
+
+    clips: [{"order": int, "mode": str, "continues_previous": bool,
+    "prompt": str}, ...] in board order -- the caller (director/api.py's
+    check_continuity()) builds this from real Clip rows; this module stays
+    ignorant of the Clip model itself, same as plan_scenes().
+    """
+    lines = []
+    for c in clips:
+        tag = f"{c['mode']}{', continues previous' if c['continues_previous'] else ''}"
+        prompt = c["prompt"].strip() or "(empty prompt)"
+        lines.append(f"Clip {c['order'] + 1} ({tag}):\n{prompt}")
+    clips_text = "\n\n".join(lines) if lines else "(no clips yet)"
+    context_note = f"Shared project context: {overarching_prompt.strip()}\n\n" if overarching_prompt.strip() else ""
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You review a sequence of video clip prompts from a multi-clip video project for "
+                "continuity problems. Clips marked \"continues previous\" are meant to read as one "
+                "unbroken shot -- flag any pair where the continuing clip's content doesn't actually "
+                "carry on the same camera angle/framing, setting, or characters the previous clip "
+                "established (a described change of angle/location/subject on a "
+                "\"continues previous\" clip is a real problem, not a stylistic choice). Also flag, "
+                "across ANY clips (continuing or not): contradictions with the shared project "
+                "context or with each other (e.g. a character's appearance or the setting "
+                "described differently in different clips), a prompt that implies dialogue/"
+                "narration/singing without giving the exact words (the render model will invent "
+                "lines rather than staying silent), and anything else vague enough to likely "
+                "produce a confused or inconsistent render.\n\n"
+                "Reply with a short bulleted list of concrete issues, each naming the specific clip "
+                "number(s) involved and what's wrong. If you find nothing worth flagging, reply "
+                "with one plain sentence saying so -- don't invent issues to fill space, and don't "
+                "comment on anything that isn't actually a continuity/consistency problem (e.g. "
+                "don't critique writing style or suggest unrelated creative changes)."
+                f"{_custom_system_note(settings.LLM_CUSTOM_SYSTEM_PROMPT_REFINE)}"
+            ),
+        },
+        {"role": "user", "content": f"{context_note}{clips_text}"},
+    ]
+    # Same reasoning as plan_scenes()'s longer timeout -- reviewing every
+    # clip in a large project is a bigger request than a single refine turn.
+    return _post_chat_completion(messages, timeout=180)

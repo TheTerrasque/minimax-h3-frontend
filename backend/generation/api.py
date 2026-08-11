@@ -136,6 +136,14 @@ class RefinePromptRequestSerializer(serializers.Serializer):
         "stays consistent with the rest of the project. See integrations/llm.py's "
         "_extra_context_note().",
     )
+    is_continuation = serializers.BooleanField(
+        required=False,
+        default=False,
+        help_text="Director Mode only: true when this prompt is for a clip flagged "
+        "continues_previous -- tells the LLM to write it as a seamless continuation (same "
+        "angle/setting/characters) rather than a fresh shot. See integrations/llm.py's "
+        "_continuation_note().",
+    )
 
 
 class RefinePromptResponseSerializer(serializers.Serializer):
@@ -183,6 +191,11 @@ class ChatRequestSerializer(serializers.Serializer):
         required=False,
         allow_blank=True,
         help_text="See RefinePromptRequestSerializer.extra_context.",
+    )
+    is_continuation = serializers.BooleanField(
+        required=False,
+        default=False,
+        help_text="See RefinePromptRequestSerializer.is_continuation.",
     )
 
 
@@ -396,6 +409,14 @@ def _validate_mode(data) -> str | Response:
     return mode
 
 
+def _parse_bool(value) -> bool:
+    """Multipart form fields arrive as strings ("true"/"false"/"1"/"0"/...),
+    not real booleans -- same truthy-string convention used ad hoc
+    elsewhere in this file (e.g. use_spectrum), pulled out here since
+    refine_prompt()/chat_message() both need it for is_continuation."""
+    return str(value).lower() in ("1", "true", "yes", "on")
+
+
 def _resolve_use_spectrum(requested: bool | None) -> bool:
     """Resolves GenerationJob.use_spectrum from settings.SPECTRUM_LEVEL plus
     what the client asked for -- the level's meaning is enforced here, not
@@ -464,6 +485,7 @@ def refine_prompt(request):
             duration_seconds=duration_seconds,
             reference_images=reference_images,
             extra_context=request.data.get("extra_context") or None,
+            is_continuation=_parse_bool(request.data.get("is_continuation")),
         )
     except llm.LLMError as exc:
         return Response({"error": str(exc)}, status=502)
@@ -536,6 +558,7 @@ def chat_message(request):
             improved_prompt=improved_prompt,
             duration_seconds=duration_seconds,
             extra_context=request.data.get("extra_context") or None,
+            is_continuation=_parse_bool(request.data.get("is_continuation")),
         )
     except llm.LLMError as exc:
         return Response({"error": str(exc)}, status=502)

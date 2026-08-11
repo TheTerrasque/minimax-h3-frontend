@@ -15,6 +15,11 @@ interface DropZoneProps {
   children: ReactNode;
 }
 
+// Async Clipboard API's read() needs an explicit user gesture and a secure
+// context; not implemented at all in some browsers (notably Firefox without
+// a flag). Feature-detected once at module load rather than per-render.
+const CLIPBOARD_READ_SUPPORTED = typeof navigator !== "undefined" && "clipboard" in navigator && "read" in navigator.clipboard;
+
 // Wraps a file-picker <label> (its <input type="file"> child is left
 // untouched, so click-to-browse keeps working exactly as before) so the
 // same slot also accepts drag-and-drop and clipboard paste. Paste has no
@@ -23,6 +28,11 @@ interface DropZoneProps {
 // keyboard-only use) and also catches paste while its child <input> has
 // focus (e.g. right after a click-to-browse), since that event bubbles up
 // to this label too.
+//
+// Keyboard paste (Ctrl/Cmd+V) only fires here once this exact element has
+// focus, which isn't always obvious to a user coming from another app --
+// a "Paste image" button (Async Clipboard API, when supported) gives an
+// explicit, always-visible alternative that doesn't depend on focus at all.
 export function DropZone({ accept, onFiles, className, children }: DropZoneProps) {
   const [isOver, setIsOver] = useState(false);
 
@@ -42,6 +52,27 @@ export function DropZone({ accept, onFiles, className, children }: DropZoneProps
     if (files.length) onFiles(files);
   }
 
+  async function handlePasteButtonClick(e: React.MouseEvent) {
+    // Also a <label>, so a plain click would otherwise open the file
+    // picker (its child <input>'s default behavior) at the same time.
+    e.preventDefault();
+    e.stopPropagation();
+    try {
+      const items = await navigator.clipboard.read();
+      const found: File[] = [];
+      for (const item of items) {
+        for (const type of item.types) {
+          if (!filesMatchingAccept([new File([], "", { type })], accept).length) continue;
+          found.push(new File([await item.getType(type)], `pasted.${type.split("/")[1] ?? "bin"}`, { type }));
+        }
+      }
+      if (found.length) onFiles(found);
+    } catch {
+      // Permission denied, or nothing on the clipboard matching `accept` --
+      // no toast, matches this component's existing quiet no-op-paste behavior.
+    }
+  }
+
   return (
     <label
       className={["file-drop", className, isOver ? "drag-over" : ""].filter(Boolean).join(" ")}
@@ -55,6 +86,11 @@ export function DropZone({ accept, onFiles, className, children }: DropZoneProps
       onPaste={handlePaste}
     >
       {children}
+      {CLIPBOARD_READ_SUPPORTED && (
+        <button type="button" className="file-drop-paste-button" onClick={(e) => void handlePasteButtonClick(e)}>
+          📋 Paste
+        </button>
+      )}
     </label>
   );
 }

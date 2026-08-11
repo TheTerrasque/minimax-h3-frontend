@@ -309,6 +309,7 @@ function LevelRow({
           value={label}
           onChange={(e) => setLabel(e.target.value)}
           onBlur={handleLabelBlur}
+          title={label}
         />
       </td>
       <td>

@@ -2,6 +2,8 @@ import { useEffect, useState, type KeyboardEvent } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   useAssembleProject,
+  useCancelAllRenders,
+  useCheckContinuity,
   useCreateClip,
   useDirectorProject,
   useRenderAllDirty,
@@ -9,7 +11,8 @@ import {
   useUpdateDirectorProject,
 } from "../../api/directorQueries";
 import { useConfig, usePresets } from "../../api/queries";
-import { CONTINUATION_CAPABLE_MODES } from "../../api/types";
+import { CONTINUATION_CAPABLE_MODES, MODE_LABELS } from "../../api/types";
+import type { Clip } from "../../api/directorTypes";
 import { ClipBox } from "./ClipBox";
 import { ClipEditorPanel } from "./ClipEditorPanel";
 import { ProjectResourcesPanel } from "./ProjectResourcesPanel";
@@ -25,6 +28,28 @@ const NEW_CLIP_MODES: { mode: NewClipMode; label: string }[] = [
   { mode: "i2v", label: "+ Image clip" },
   { mode: "r2v", label: "+ Reference clip" },
 ];
+
+// Truncated so a large project's context doesn't balloon every refine/chat
+// call's token usage -- this is meant to give the LLM a sense of what's
+// already happened, not the full text of every earlier clip.
+const PREVIOUS_CLIP_PROMPT_MAX_CHARS = 200;
+
+// A short summary of every clip before `beforeOrder`, for AI refine/chat's
+// extra_context (see ClipEditorPanel's previousClipsContext prop) -- the
+// raw (not AI-refined) prompt, since that's the shorter, more direct
+// version of what the user actually asked for.
+function buildPreviousClipsContext(clips: Clip[], beforeOrder: number): string {
+  const previous = clips.filter((c) => c.order < beforeOrder);
+  if (previous.length === 0) return "";
+  const lines = previous.map((c) => {
+    const prompt = c.prompt.trim();
+    const truncated =
+      prompt.length > PREVIOUS_CLIP_PROMPT_MAX_CHARS ? `${prompt.slice(0, PREVIOUS_CLIP_PROMPT_MAX_CHARS)}…` : prompt;
+    const tag = `${MODE_LABELS[c.mode]}${c.continues_previous ? ", continues previous" : ""}`;
+    return `${c.order + 1}. (${tag}) ${truncated || "(empty prompt)"}`;
+  });
+  return `Previous clips in this project, in order:\n${lines.join("\n")}`;
+}
 
 export function ProjectBoard() {
   const { projectId: projectIdParam } = useParams<{ projectId: string }>();
@@ -45,7 +70,9 @@ export function ProjectBoard() {
   const createClip = useCreateClip();
   const reorderClip = useReorderClip();
   const renderAllDirty = useRenderAllDirty();
+  const cancelAllRenders = useCancelAllRenders();
   const assembleProject = useAssembleProject();
+  const checkContinuity = useCheckContinuity();
 
   // Prefetched so "+ Add clip" can create one immediately with a sensible
   // default duration, without a request-then-wait step in between.
@@ -60,6 +87,7 @@ export function ProjectBoard() {
   const [titleDraft, setTitleDraft] = useState("");
   const [promptDraft, setPromptDraft] = useState("");
   const [planModalOpen, setPlanModalOpen] = useState(false);
+  const [continuityReportOpen, setContinuityReportOpen] = useState(false);
 
   // Deliberately narrower than "whenever project.data changes" -- this
   // project is polled every few seconds while a clip is rendering (see
@@ -116,7 +144,15 @@ export function ProjectBoard() {
     if (e.key === "Escape") setEditingTitle(false);
   }
 
+  async function handleCheckContinuity() {
+    setContinuityReportOpen(true);
+    await checkContinuity.mutateAsync(projectId);
+  }
+
   const dirtyCount = project.data?.clips.filter((c) => c.needs_render).length ?? 0;
+  const activeCount =
+    project.data?.clips.filter((c) => c.current_job_status === "queued" || c.current_job_status === "processing")
+      .length ?? 0;
   const selectedClip = project.data?.clips.find((c) => c.id === selectedClipId) ?? null;
   const canAssemble = !!project.data?.clips.length && project.data.clips.every((c) => c.video_url && !c.needs_render);
   // Only r2v clips can actually wire a shared resource into a render (see
@@ -125,6 +161,7 @@ export function ProjectBoard() {
   const hasResources = !!project.data?.resources.length;
   const visibleClipModes = hasResources ? NEW_CLIP_MODES.filter((m) => m.mode === "r2v") : NEW_CLIP_MODES;
   const resourceLabels = project.data?.resources.map((r) => r.token_label) ?? [];
+  const previousClipsContext = selectedClip && project.data ? buildPreviousClipsContext(project.data.clips, selectedClip.order) : "";
 
   return (
     <section className="director-board">
@@ -216,6 +253,15 @@ export function ProjectBoard() {
             <button type="button" onClick={() => setPlanModalOpen(true)}>
               Generate from script…
             </button>
+            {config.data?.llm_enabled && (
+              <button
+                type="button"
+                onClick={() => void handleCheckContinuity()}
+                disabled={checkContinuity.isPending || project.data.clips.length === 0}
+              >
+                {checkContinuity.isPending ? "Checking…" : "Check continuity"}
+              </button>
+            )}
             <button
               type="button"
               className="button button-primary"
@@ -224,6 +270,17 @@ export function ProjectBoard() {
             >
               {renderAllDirty.isPending ? "Starting…" : `Render all dirty (${dirtyCount})`}
             </button>
+            {activeCount > 0 && (
+              <button
+                type="button"
+                className="button-danger"
+                onClick={() => cancelAllRenders.mutate(projectId)}
+                disabled={cancelAllRenders.isPending}
+              >
+                <span aria-hidden="true">⏹</span>{" "}
+                {cancelAllRenders.isPending ? "Cancelling…" : `Cancel all (${activeCount})`}
+              </button>
+            )}
             <button
               type="button"
               onClick={() => assembleProject.mutate(projectId)}
@@ -279,6 +336,7 @@ export function ProjectBoard() {
           clip={selectedClip}
           isFirstClip={selectedClip.order === 0}
           overarchingPrompt={project.data?.overarching_prompt ?? ""}
+          previousClipsContext={previousClipsContext}
           projectResourceLabels={resourceLabels}
           onClose={() => setSelectedClipId(null)}
         />
@@ -291,6 +349,25 @@ export function ProjectBoard() {
           projectResources={project.data?.resources ?? []}
           onClose={() => setPlanModalOpen(false)}
         />
+      )}
+
+      {continuityReportOpen && (
+        <div className="modal-overlay" onClick={() => setContinuityReportOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              className="modal-close"
+              onClick={() => setContinuityReportOpen(false)}
+              aria-label="Close"
+            >
+              ×
+            </button>
+            <h2>Continuity check</h2>
+            {checkContinuity.isPending && <p className="hint">Reviewing every clip's prompt…</p>}
+            {checkContinuity.isError && <p className="error">Couldn't run the continuity check. Try again.</p>}
+            {checkContinuity.data && <p className="continuity-report">{checkContinuity.data.report}</p>}
+          </div>
+        </div>
       )}
     </section>
   );

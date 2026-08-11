@@ -1203,11 +1203,12 @@ select {
 
 .catalog-label-input {
   font-weight: 600;
+  font-size: 15px;
   border: 1px solid transparent;
   background: none;
   padding: 4px 6px;
   border-radius: 4px;
-  width: 140px;
+  width: 220px;
 }
 
 .catalog-label-input:hover,
@@ -1492,24 +1493,41 @@ select {
 }
 
 .director-project-card {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  width: 100%;
-  text-align: left;
-  padding: 14px 16px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: transparent;
-  cursor: pointer;
-  font: inherit;
-  color: inherit;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .director-project-card:hover {
   border-color: var(--accent-border);
   box-shadow: var(--shadow);
+}
+
+.director-project-card-open {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  text-align: left;
+  padding: 14px 16px 6px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+.director-project-card-title-input {
+  font: inherit;
+  font-weight: 600;
+  font-size: 1em;
+  width: calc(100% - 32px);
+  margin: 14px 16px 0;
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: inherit;
 }
 
 .director-project-card-title {
@@ -1520,6 +1538,14 @@ select {
 .director-project-card-meta {
   font-size: 13px;
   color: var(--text);
+}
+
+.director-project-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px 12px;
+  font-size: 13px;
 }
 
 .director-board {
@@ -1842,6 +1868,11 @@ select {
 
 .plan-scene-notes {
   margin: 4px 0 0;
+}
+
+.continuity-report {
+  white-space: pre-wrap;
+  line-height: 1.5;
 }
 
 .plan-resource-hint {

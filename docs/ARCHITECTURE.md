@@ -628,6 +628,16 @@ single `GenerationJob`-backed render, positioned by `order`.
   predecessor's own values regardless of what its own resolved preset's
   megapixels would otherwise imply, so a chain never mismatches even
   across a mode change (e.g. a t2v clip continued by an i2v one).
+  **Duration is locked the same way** (`resolve_clip_duration()`, same
+  call sites) — this one isn't just a resolution nicety:
+  `MiniMaxH3ChainLoopStart` validates every resubmission in a run against
+  whatever scene 1 was originally submitted with, including
+  `default_duration_seconds`/`default_steps`, and rejects the resume
+  outright on a mismatch ("clip N was generated from different settings,
+  prompts, seeds, or durations" — confirmed against a real failed
+  render). `_resolve_chain_params()` also reads those two values from the
+  run's head clip (`chain_clips[0]`) defensively, regardless of what the
+  currently-rendering clip's own fields say.
 - **Shared resources require reference mode** — a `ProjectResource` can
   only actually reach a render through `MiniMaxH3ReferenceToVideo`'s
   `ref_image_N`/etc inputs, so once a project has any, every `Clip` in it
@@ -660,7 +670,31 @@ single `GenerationJob`-backed render, positioned by `order`.
   `Clip.chain_run_name`/`chain_scene_number` get set (only on confirmed
   success — never eagerly at job-creation time, so a failed render can't
   leave a later clip "resuming" from a checkpoint that was never actually
-  saved).
+  saved). `POST /api/director/projects/<id>/cancel_all/` cancels every
+  clip currently queued/processing at once (`api.py`'s `_cancel_clip_job()`
+  helper, shared with the single-clip `cancel_clip()` endpoint) — stops
+  "Render all dirty" (or any number of independently-advancing chains)
+  mid-flight in one action.
+- **AI continuity awareness** — two things address a real failure mode
+  (confirmed live: an unstructured continuation prompt jumped to a
+  different camera angle, and a prompt that only implied dialogue got
+  invented lines from the render model). First, `integrations/llm.py`'s
+  shared `_PROMPT_STYLE_NOTE` now always tells the LLM to write exact
+  dialogue words rather than describing that a character "says
+  something", and `improve_prompt()`/`chat_reply()` take an
+  `is_continuation` flag (`_continuation_note()`) that tells it a
+  `continues_previous` clip's prompt must read as an unbroken continuation
+  of the previous clip's angle/setting/characters, not a fresh shot — both
+  also apply to `plan_scenes()`'s system prompt and
+  `DIRECTOR_PLAN_GUIDE_en.md` itself. Second, `ClipEditorPanel` passes a
+  short summary of every earlier clip's raw prompt (mode + truncated text,
+  built by `ProjectBoard`'s `buildPreviousClipsContext()`) as additional
+  `extra_context`, so refine/chat isn't limited to the project's
+  `overarching_prompt` alone. Third, `POST /api/director/projects/<id>/
+  check_continuity/` (`integrations/llm.check_project_continuity()`) sends
+  every clip's prompt at once and returns a free-text (not
+  structured/automated) report of problems it finds, shown in a modal —
+  purely informational, changes nothing.
 - **LLM planning ("Generate from script")** — `POST
   /api/director/projects/<id>/plan/` calls `integrations/llm.plan_scenes()`
   (system context: `resources/prompt instructions/
@@ -709,12 +743,18 @@ single `GenerationJob`-backed render, positioned by `order`.
   storage) nowhere else today — see the `generation/media_views.py`
   gotcha in `AGENTS.md` for what happens when this is forgotten.
 - **Frontend** — `frontend/src/features/director/`: `ProjectListScreen`
+  (per-project rename/delete inline on each card, plus a `clip_count`/
+  `dirty_count`/`active_count`/`eta_seconds` progress summary from the
+  list endpoint's annotated queryset — see `projects()`'s GET — polling
+  while any project has an active render, same shape as the board's own
+  polling)
   → `ProjectBoard` (title, overarching prompt, the project-wide aspect
   ratio/quality selectors, `ProjectResourcesPanel` — which hides its
   "add" controls and explains why whenever the project has a non-r2v clip
   — the clip timeline with chain connectors between continuation boxes
   and a "+ Reference clip"-only add-row once the project has resources,
-  "Generate from script…"/"Render all dirty"/"Export" actions) →
+  "Generate from script…"/"Check continuity"/"Render all dirty"/
+  "Cancel all"/"Export" actions) →
   `ClipEditorPanel` (prompt + AI refine/chat — reuses the same
   `ChatModal`/`useRefinePrompt`/`useChatReply` as the main Generate
   screen, with the project's `overarching_prompt` threaded through as

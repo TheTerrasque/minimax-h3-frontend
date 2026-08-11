@@ -17,6 +17,10 @@ export function useDirectorProjects() {
   return useQuery({
     queryKey: ["director-projects"],
     queryFn: () => apiFetch<Project[]>("/director/projects/"),
+    // Polls while any project has a render in flight, so the list
+    // screen's progress/ETA summary (see ProjectListScreen) stays live --
+    // same shape as useDirectorProject's per-project polling.
+    refetchInterval: (query) => (query.state.data?.some((p) => (p.active_count ?? 0) > 0) ? 4000 : false),
   });
 }
 
@@ -276,6 +280,27 @@ export function useCancelClip() {
     onSuccess: (_data, { projectId }) => {
       void queryClient.invalidateQueries({ queryKey: ["director-project", projectId] });
     },
+  });
+}
+
+export function useCancelAllRenders() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (projectId: number) =>
+      apiFetch<Clip[]>(`/director/projects/${projectId}/cancel_all/`, { method: "POST" }),
+    onSuccess: (_data, projectId) => {
+      void queryClient.invalidateQueries({ queryKey: ["director-project", projectId] });
+    },
+  });
+}
+
+// One-shot AI review of every clip's prompt for continuity/consistency
+// issues -- see backend director/api.py's check_continuity(). Purely
+// informational, doesn't change anything, so no cache invalidation.
+export function useCheckContinuity() {
+  return useMutation({
+    mutationFn: (projectId: number) =>
+      apiFetch<{ report: string }>(`/director/projects/${projectId}/check_continuity/`, { method: "POST" }),
   });
 }
 

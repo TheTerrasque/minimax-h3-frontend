@@ -173,6 +173,10 @@ export function useRefinePrompt() {
        * guide -- Director Mode passes the project's overarching_prompt
        * here so refine stays consistent with the rest of the project. */
       extraContext?: string;
+      /** Director Mode only: true for a clip flagged continues_previous --
+       * tells the LLM to write it as a seamless continuation instead of a
+       * fresh shot. */
+      isContinuation?: boolean;
     }) => {
       const form = new FormData();
       form.set("mode", input.mode);
@@ -181,6 +185,7 @@ export function useRefinePrompt() {
       for (const label of input.referenceLabels ?? []) form.append("reference_labels", label);
       for (const file of input.referenceImages ?? []) form.append("reference_images", file);
       if (input.extraContext) form.set("extra_context", input.extraContext);
+      if (input.isContinuation) form.set("is_continuation", "true");
       return apiFetch<{ improved_prompt: string }>("/prompt/refine/", { method: "POST", body: form });
     },
   });
@@ -210,6 +215,10 @@ export interface ChatReplyInput {
    * guide -- Director Mode passes the project's overarching_prompt here
    * so chat stays consistent with the rest of the project. */
   extraContext?: string;
+  /** Director Mode only: true for a clip flagged continues_previous --
+   * tells the LLM to write it as a seamless continuation instead of a
+   * fresh shot. */
+  isContinuation?: boolean;
 }
 
 export function useChatReply() {
@@ -225,6 +234,7 @@ export function useChatReply() {
       for (const label of input.referenceLabels ?? []) form.append("reference_labels", label);
       for (const file of input.referenceImages ?? []) form.append("reference_images", file);
       if (input.extraContext) form.set("extra_context", input.extraContext);
+      if (input.isContinuation) form.set("is_continuation", "true");
       return apiFetch<ChatMessage>("/prompt/chat/", { method: "POST", body: form });
     },
   });
