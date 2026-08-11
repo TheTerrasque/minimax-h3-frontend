@@ -8,7 +8,7 @@ import {
   useReorderClip,
   useUpdateDirectorProject,
 } from "../../api/directorQueries";
-import { usePresets } from "../../api/queries";
+import { useConfig, usePresets } from "../../api/queries";
 import { CONTINUATION_CAPABLE_MODES } from "../../api/types";
 import { ClipBox } from "./ClipBox";
 import { ClipEditorPanel } from "./ClipEditorPanel";
@@ -38,6 +38,7 @@ export function ProjectBoard() {
   // check below instead.
   const projectId = Number(projectIdParam);
   const navigate = useNavigate();
+  const config = useConfig();
 
   const project = useDirectorProject(Number.isNaN(projectId) ? null : projectId);
   const updateProject = useUpdateDirectorProject();
@@ -75,19 +76,19 @@ export function ProjectBoard() {
   if (Number.isNaN(projectId)) return <p className="error">Invalid project.</p>;
 
   async function handleAddClip(mode: NewClipMode) {
-    if (!project.data) return;
+    const proj = project.data;
+    if (!proj) return;
     const presets = presetsByMode[mode].data;
-    const duration = presets?.[0]?.durations[0];
+    // Quality is project-wide (proj.quality_label) -- match this mode's
+    // own preset row for that shared label, same fallback the backend
+    // uses if the label doesn't have a row for this mode (see
+    // director/services.py's resolve_preset_for_mode()).
+    const preset = presets?.find((p) => p.label === proj.quality_label) ?? presets?.[0];
+    const duration = preset?.durations[0];
     if (!duration) return;
-    const lastClip = project.data.clips[project.data.clips.length - 1];
+    const lastClip = proj.clips[proj.clips.length - 1];
     const continuesPrevious = !!lastClip && CONTINUATION_CAPABLE_MODES.has(mode);
-    const clip = await createClip.mutateAsync({
-      projectId,
-      mode,
-      durationId: duration.id,
-      aspectRatio: continuesPrevious ? undefined : "16:9",
-      continuesPrevious,
-    });
+    const clip = await createClip.mutateAsync({ projectId, mode, durationId: duration.id, continuesPrevious });
     setSelectedClipId(clip.id);
   }
 
@@ -102,6 +103,14 @@ export function ProjectBoard() {
     await updateProject.mutateAsync({ projectId, overarchingPrompt: promptDraft });
   }
 
+  async function handleAspectRatioChange(aspectRatio: string) {
+    await updateProject.mutateAsync({ projectId, aspectRatio });
+  }
+
+  async function handleQualityChange(qualityLabel: string) {
+    await updateProject.mutateAsync({ projectId, qualityLabel });
+  }
+
   function handleTitleKeyDown(e: KeyboardEvent<HTMLInputElement>) {
     if (e.key === "Enter") e.currentTarget.blur();
     if (e.key === "Escape") setEditingTitle(false);
@@ -110,6 +119,12 @@ export function ProjectBoard() {
   const dirtyCount = project.data?.clips.filter((c) => c.needs_render).length ?? 0;
   const selectedClip = project.data?.clips.find((c) => c.id === selectedClipId) ?? null;
   const canAssemble = !!project.data?.clips.length && project.data.clips.every((c) => c.video_url && !c.needs_render);
+  // Only r2v clips can actually wire a shared resource into a render (see
+  // backend director/services.py's project_requires_reference_mode()) --
+  // once the project has any, every clip must be one.
+  const hasResources = !!project.data?.resources.length;
+  const visibleClipModes = hasResources ? NEW_CLIP_MODES.filter((m) => m.mode === "r2v") : NEW_CLIP_MODES;
+  const resourceLabels = project.data?.resources.map((r) => r.token_label) ?? [];
 
   return (
     <section className="director-board">
@@ -161,6 +176,40 @@ export function ProjectBoard() {
             />
           </fieldset>
 
+          <fieldset className="prompt-fieldset">
+            <legend>Aspect ratio &amp; quality</legend>
+            <p className="hint">
+              Shared by every clip in the project (not chosen per-clip) — MiniMax H3's continuity
+              model needs consistent resolution across a chain. Changing either marks every clip
+              dirty.
+            </p>
+            <div className="toolbar">
+              <label className="toolbar-control">
+                <span>Aspect ratio</span>
+                <select value={project.data.aspect_ratio} onChange={(e) => void handleAspectRatioChange(e.target.value)}>
+                  {config.data?.aspect_ratios.map((ratio) => (
+                    <option key={ratio.value} value={ratio.value}>
+                      {ratio.label}
+                    </option>
+                  ))}
+                  {!config.data?.aspect_ratios.some((r) => r.value === project.data.aspect_ratio) && (
+                    <option value={project.data.aspect_ratio}>{project.data.aspect_ratio}</option>
+                  )}
+                </select>
+              </label>
+              <label className="toolbar-control">
+                <span>Quality</span>
+                <select value={project.data.quality_label} onChange={(e) => void handleQualityChange(e.target.value)}>
+                  {presetsByMode.t2v.data?.map((preset) => (
+                    <option key={preset.label} value={preset.label}>
+                      {preset.label} ({preset.megapixels}MP{preset.is_draft ? ", draft" : ""})
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          </fieldset>
+
           <ProjectResourcesPanel project={project.data} />
 
           <div className="director-board-actions">
@@ -205,13 +254,19 @@ export function ProjectBoard() {
             ))}
 
             <div className="director-add-clip">
-              {NEW_CLIP_MODES.map(({ mode, label }) => (
+              {visibleClipModes.map(({ mode, label }) => (
                 <button type="button" key={mode} onClick={() => void handleAddClip(mode)} disabled={createClip.isPending}>
                   {label}
                 </button>
               ))}
             </div>
           </div>
+          {hasResources && (
+            <p className="hint">
+              This project has shared references — every clip must be a reference clip while
+              they're attached.
+            </p>
+          )}
           {project.data.clips.length === 0 && (
             <p className="empty-state">No clips yet — add one above to start the sequence.</p>
           )}
@@ -224,6 +279,7 @@ export function ProjectBoard() {
           clip={selectedClip}
           isFirstClip={selectedClip.order === 0}
           overarchingPrompt={project.data?.overarching_prompt ?? ""}
+          projectResourceLabels={resourceLabels}
           onClose={() => setSelectedClipId(null)}
         />
       )}

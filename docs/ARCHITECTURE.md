@@ -578,9 +578,10 @@ A separate `director` app, layered strictly on top of `generation`
 signal, `generation.signals.job_finished`, connected from
 `director/apps.py`'s `ready()`). A "movie" is a `Project`: a title, an
 `overarching_prompt` (shared world/setting/character prose every clip
-draws on), a set of `ProjectResource`s (character sheets/voice/world
-refs), and an ordered sequence of `Clip`s — each one a single
-`GenerationJob`-backed render, positioned by `order`.
+draws on), an `aspect_ratio`/`quality_label` (see "Project-wide aspect
+ratio & quality" below), a set of `ProjectResource`s (character
+sheets/voice/world refs), and an ordered sequence of `Clip`s — each one a
+single `GenerationJob`-backed render, positioned by `order`.
 
 - **Continuity** — a `Clip` can be flagged `continues_previous`
   (positional: "splice motion/audio continuity from whichever clip is now
@@ -603,12 +604,44 @@ refs), and an ordered sequence of `Clip`s — each one a single
   details and the fallback's known tradeoffs (motion/audio can stutter at
   the join without the real extension).
 - **Dirty-cascade** — editing a clip's render-affecting fields (prompt,
-  mode, refs, quality/duration, `continues_previous`) marks it dirty, then
-  walks forward marking every directly-chained `continues_previous` clip
-  after it dirty too, stopping at the next clip that starts a fresh scene.
-  Editing `Project.overarching_prompt`/resources dirties every clip in the
-  project (`director/services.py`'s `mark_dirty_cascade()`/
-  `mark_project_dirty()`).
+  refs, duration, `continues_previous`) marks it dirty, then walks forward
+  marking every directly-chained `continues_previous` clip after it dirty
+  too, stopping at the next clip that starts a fresh scene. Editing
+  `Project.overarching_prompt`/`aspect_ratio`/`quality_label`/resources
+  dirties every clip in the project (`director/services.py`'s
+  `mark_dirty_cascade()`/`mark_project_dirty()`).
+- **Project-wide aspect ratio & quality** — both live on `Project`, not
+  `Clip`: MiniMax H3's continuity model requires every scene in a chain to
+  share one resolution, and a shared quality tier keeps every clip's
+  render comparable, so neither is a per-clip choice. `quality_label` is a
+  `RenderPreset.label` string (quality tiers share a label across modes
+  but each mode has its own row/megapixels, see `RenderPreset`'s own
+  docstring) — `director/services.py::resolve_preset_for_mode()` looks up
+  the right row for a given `Clip.mode`, falling back to that mode's first
+  active preset if the label has no row for it. A `Clip`'s own
+  `preset`/`width`/`height` are just cached derivations, recomputed
+  whenever the project setting changes
+  (`recompute_project_resolutions()`, called from `project_detail()`'s
+  PATCH) or a single clip's `continues_previous` toggles
+  (`resolve_clip_width_height()`, from `clip_detail()`'s PATCH) — a
+  continuing clip's width/height are always locked to its immediate
+  predecessor's own values regardless of what its own resolved preset's
+  megapixels would otherwise imply, so a chain never mismatches even
+  across a mode change (e.g. a t2v clip continued by an i2v one).
+- **Shared resources require reference mode** — a `ProjectResource` can
+  only actually reach a render through `MiniMaxH3ReferenceToVideo`'s
+  `ref_image_N`/etc inputs, so once a project has any, every `Clip` in it
+  must be `r2v` (`director/services.py::project_requires_reference_mode()`,
+  enforced by `clips()`/`project_resources()` POST and by `plan_project()`
+  refusing to run at all for such a project — script planning never
+  proposes r2v, see below). At render time,
+  `_build_job_for_clip()` feeds `_combined_references()`'s list into the
+  new `GenerationJob`: the project's resources first (so a `<Picture N>`
+  token means the same thing in every clip's prompt), then the clip's own
+  `ClipReferenceAsset`s appended after, per kind —
+  `ClipReferenceAsset.label`'s displayed token is offset by the project's
+  own resource count of that kind so what the UI shows always matches
+  what actually gets wired in.
 - **Render orchestration** — `render_clip()` walks backward to find the
   head of a dirty continuation run and enqueues only that job;
   `director/signals.py`'s `on_job_finished` receiver (listening to
@@ -632,18 +665,24 @@ refs), and an ordered sequence of `Clip`s — each one a single
   the — possibly edited — scene list, `replace: bool`) calls
   `apply_planned_scenes()` to actually create `Clip` rows, appended after
   the project's existing clips by default or replacing them entirely.
-  Applying never itself triggers a render.
+  Applying never itself triggers a render. Refuses to run at all
+  (`plan_project()`/`apply_planned_scenes()` both check) once a project
+  has shared resources — see "Shared resources require reference mode"
+  above; the planning guide never proposes r2v, so there's no way for a
+  generated scene to satisfy that requirement.
 - **Assembly/export** — `POST /api/director/projects/<id>/assemble/`
   requires every clip to be rendered and clean, then concatenates their
   videos in board order via `integrations/assembly.py::concat_videos()`
   into `Project.assembled_video_file`. Deliberately **not** the
-  stream-copy concat demuxer (`-c copy`): Director allows each
-  non-continuation "fresh scene" clip its own aspect ratio/resolution,
-  which stream-copy concat doesn't tolerate reliably, so this always goes
-  through the concat *filter* instead — every clip is scaled/padded onto
-  the largest clip's resolution and normalized to the first clip's frame
-  rate before concatenation. Runs synchronously in the request (clips are
-  short, so total runtime is small); overwrites any previous export.
+  stream-copy concat demuxer (`-c copy`): even though aspect ratio/quality
+  are project-wide now, a clip rendered before the most recent settings
+  change (and not yet re-rendered) can still be at a different resolution
+  than its neighbours, which stream-copy concat doesn't tolerate reliably
+  — so this always goes through the concat *filter* instead, scaling/
+  padding every clip onto the largest clip's resolution and normalizing to
+  the first clip's frame rate before concatenation. Runs synchronously in
+  the request (clips are short, so total runtime is small); overwrites any
+  previous export.
 - **Media serving** — `ProjectResource`/`ClipReferenceAsset`/
   `Project.assembled_video_file` live under their own `director_*/`
   `MEDIA_ROOT` prefixes, served by `director/media_views.py`'s own
@@ -656,17 +695,21 @@ refs), and an ordered sequence of `Clip`s — each one a single
   storage) nowhere else today — see the `generation/media_views.py`
   gotcha in `AGENTS.md` for what happens when this is forgotten.
 - **Frontend** — `frontend/src/features/director/`: `ProjectListScreen`
-  → `ProjectBoard` (title, overarching prompt, `ProjectResourcesPanel`,
-  the clip timeline with chain connectors between continuation boxes,
+  → `ProjectBoard` (title, overarching prompt, the project-wide aspect
+  ratio/quality selectors, `ProjectResourcesPanel` — which hides its
+  "add" controls and explains why whenever the project has a non-r2v clip
+  — the clip timeline with chain connectors between continuation boxes
+  and a "+ Reference clip"-only add-row once the project has resources,
   "Generate from script…"/"Render all dirty"/"Export" actions) →
   `ClipEditorPanel` (prompt + AI refine/chat — reuses the same
   `ChatModal`/`useRefinePrompt`/`useChatReply` as the main Generate
-  screen, just with the project's `overarching_prompt` threaded through as
-  `extra_context` — quality/duration/aspect-ratio controls, locked to the
-  predecessor's resolution while `continues_previous`, reference slots,
-  render/cancel/delete). `ScriptPlanModal` is the two-step "propose, then
-  confirm" UI for the LLM planning endpoints above. Routes: `/director`
-  and `/director/:projectId` in `App.tsx`.
+  screen, with the project's `overarching_prompt` threaded through as
+  `extra_context` and its resources' `token_label`s prepended to the
+  reference-labels list passed alongside — only a duration slider remains
+  here; quality/aspect ratio moved to the board, see above — reference
+  slots, render/cancel/delete). `ScriptPlanModal` is the two-step
+  "propose, then confirm" UI for the LLM planning endpoints above. Routes:
+  `/director` and `/director/:projectId` in `App.tsx`.
 
 ## Frontend
 

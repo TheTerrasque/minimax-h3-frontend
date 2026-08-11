@@ -19,6 +19,7 @@ from django.db import models
 
 from generation.models import Mode, RenderDuration, RenderPreset, _random_upload_path
 from generation.models import GenerationJob, ReferenceAsset
+from generation.resolution import DEFAULT_ASPECT_RATIO
 
 # Continuation is only meaningful for modes whose sampler node actually
 # produces a conditioning+latent pair MiniMaxH3MotionContext can consume --
@@ -56,6 +57,24 @@ class Project(models.Model):
         help_text="Shared world/setting/character context prose, given to every Clip's render "
         "and to the LLM prompt-assist calls made against this project's clips (see "
         "integrations/llm.py's extra_context).",
+    )
+    aspect_ratio = models.CharField(
+        max_length=10,
+        default=DEFAULT_ASPECT_RATIO,
+        help_text="Applies to every Clip in the project, not chosen per-clip -- MiniMax H3's "
+        "continuity model requires consistent resolution across a chain, and this app treats "
+        "aspect ratio as a project-wide decision (see generation.resolution for valid values). "
+        "Changing this recomputes every Clip's width/height and marks the whole project dirty "
+        "-- see director/services.py's recompute_project_resolutions().",
+    )
+    quality_label = models.CharField(
+        max_length=60,
+        blank=True,
+        default="",
+        help_text="The shared RenderPreset.label every Clip's own (per-mode) preset is resolved "
+        "from -- see director/services.py's resolve_preset_for_mode(). Same project-wide "
+        "reasoning as aspect_ratio above: quality is a whole-project decision here, not a "
+        "per-clip one.",
     )
     assembled_video_file = models.FileField(
         upload_to=project_assembled_video_upload_path,
@@ -143,14 +162,21 @@ class Clip(models.Model):
     prompt = models.TextField(blank=True, default="")
     improved_prompt = models.TextField(blank=True, default="")
 
-    preset = models.ForeignKey(RenderPreset, on_delete=models.PROTECT, related_name="director_clips")
-    duration = models.ForeignKey(RenderDuration, on_delete=models.PROTECT, related_name="director_clips")
-    aspect_ratio = models.CharField(
-        max_length=10,
-        help_text="Same shape as GenerationJob.aspect_ratio. Locked to the predecessor's value "
-        "when continues_previous -- context frames must match resolution.",
+    preset = models.ForeignKey(
+        RenderPreset,
+        on_delete=models.PROTECT,
+        related_name="director_clips",
+        help_text="Derived from the project's quality_label for this Clip's own mode -- see "
+        "director/services.py's resolve_preset_for_mode(). Not independently chosen; a cached "
+        "snapshot the same way GenerationJob.preset is, so later catalog edits don't retroactively "
+        "change what's already shown.",
     )
-    width = models.PositiveIntegerField()
+    duration = models.ForeignKey(RenderDuration, on_delete=models.PROTECT, related_name="director_clips")
+    width = models.PositiveIntegerField(
+        help_text="Computed from preset.megapixels + project.aspect_ratio, except while "
+        "continues_previous, where it's locked to the immediate predecessor's own width -- see "
+        "director/services.py's resolve_clip_width_height().",
+    )
     height = models.PositiveIntegerField()
 
     needs_render = models.BooleanField(
@@ -243,14 +269,21 @@ class ClipReferenceAsset(models.Model):
     @property
     def label(self) -> str:
         """Same "<Picture N>"/"<Video N>"/"<Audio N>" token convention as
-        ReferenceAsset.label, scoped to this clip."""
+        ReferenceAsset.label, but offset by however many of the project's
+        own shared ProjectResources of the same kind precede this Clip's
+        references at render time (see director/services.py's
+        _combined_references()) -- so the token shown here always matches
+        what actually gets wired into ref_image_N/etc, even though project
+        resources and this clip's own references live in separate tables.
+        """
         kind_labels = {
             ReferenceAsset.Kind.IMAGE: "Picture",
             ReferenceAsset.Kind.VIDEO: "Video",
             ReferenceAsset.Kind.AUDIO: "Audio",
         }
+        project_offset = self.clip.project.resources.filter(kind=self.kind).count()
         same_kind_ids = list(
             self.clip.references.filter(kind=self.kind).order_by("order", "id").values_list("id", flat=True)
         )
         position = same_kind_ids.index(self.id) + 1 if self.id in same_kind_ids else 1
-        return f"{kind_labels[self.kind]} {position}"
+        return f"{kind_labels[self.kind]} {project_offset + position}"

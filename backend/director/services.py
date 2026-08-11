@@ -13,11 +13,17 @@ from django.core.files.base import ContentFile
 from django.db import transaction
 from django_q.tasks import async_task
 
-from generation.models import GenerationJob, Mode, ReferenceAsset, RenderPreset
+from generation.models import GenerationJob, Mode, ReferenceAsset, RenderDuration, RenderPreset
 from generation.resolution import compute_resolution
 from integrations import media_post, motion_context
 
-from .models import CONTINUATION_CAPABLE_MODES, Clip, Project
+from .models import CONTINUATION_CAPABLE_MODES, Clip, Project, ProjectResource
+
+# The only modes Director ever creates clips in -- shared by clips()/
+# apply_planned_scenes()'s quality-tier lookups below (RenderPreset rows
+# for image/audio modes are a separate, differently-labeled catalog, see
+# generation/models.py's Mode docstring -- not relevant here).
+_VIDEO_MODES = (Mode.TEXT_TO_VIDEO, Mode.IMAGE_TO_VIDEO, Mode.REFERENCE_TO_VIDEO)
 
 _ACTIVE_JOB_STATUSES = {GenerationJob.Status.QUEUED, GenerationJob.Status.PROCESSING}
 
@@ -44,6 +50,132 @@ class PlanError(Exception):
 
 def _predecessor(clip: Clip) -> Clip | None:
     return Clip.objects.filter(project_id=clip.project_id, order__lt=clip.order).order_by("-order").first()
+
+
+def available_quality_labels() -> list[str]:
+    """Every distinct RenderPreset.label active for at least one of
+    Director's video modes, in catalog order -- the valid values for
+    Project.quality_label (see director/api.py's projects()/project_detail()
+    validation). Deduplicated in Python rather than via .distinct() +
+    .order_by(): Postgres rejects SELECT DISTINCT <col> ordered by columns
+    outside that same column list, which sort_order/mode/megapixels would be.
+    """
+    seen: list[str] = []
+    labels = (
+        RenderPreset.objects.filter(mode__in=_VIDEO_MODES, is_active=True)
+        .order_by("sort_order", "mode", "megapixels")
+        .values_list("label", flat=True)
+    )
+    for label in labels:
+        if label not in seen:
+            seen.append(label)
+    return seen
+
+
+def resolve_preset_for_mode(quality_label: str, mode: str) -> RenderPreset | None:
+    """The RenderPreset `mode` should use for Project.quality_label. Quality
+    tiers share a label across modes but each mode has its own row with its
+    own megapixels/steps (see RenderPreset's own docstring), so this is a
+    per-mode lookup rather than a single FK on Project. Falls back to the
+    first active preset for the mode at all if the label doesn't have a row
+    for it (e.g. an admin retired that combination after a project already
+    picked it) -- consistent with this app's general soft-reroute-rather-
+    than-hard-fail posture around is_active gating elsewhere.
+    """
+    preset = (
+        RenderPreset.objects.filter(mode=mode, label=quality_label, is_active=True).first()
+        if quality_label
+        else None
+    )
+    return preset or RenderPreset.objects.filter(mode=mode, is_active=True).first()
+
+
+def _nearest_duration(preset: RenderPreset, target_seconds: float) -> RenderDuration | None:
+    """The active RenderDuration under `preset` closest to target_seconds --
+    used when a Clip's preset changes (Project.quality_label edited) so its
+    duration choice carries over as closely as possible instead of silently
+    resetting."""
+    durations = list(preset.durations.filter(is_active=True))
+    return min(durations, key=lambda d: abs(d.duration_seconds - target_seconds)) if durations else None
+
+
+def recompute_project_resolutions(project: Project) -> None:
+    """Re-derives every Clip's preset/duration/width/height from the
+    project's current aspect_ratio/quality_label -- call after either
+    changes (see director/api.py's project_detail() PATCH). Both are
+    project-wide settings now (MiniMax H3's continuity model requires
+    consistent resolution across a chain, and a shared quality tier keeps
+    every clip's render comparable); a Clip's own preset/width/height are
+    just cached derivations of them, not independently chosen.
+    """
+    predecessor: Clip | None = None
+    for clip in project.clips.order_by("order").select_related("preset", "duration"):
+        preset = resolve_preset_for_mode(project.quality_label, clip.mode)
+        if preset is not None and preset.id != clip.preset_id:
+            duration = _nearest_duration(preset, clip.duration.duration_seconds)
+            if duration is not None:
+                clip.preset = preset
+                clip.duration = duration
+        elif preset is not None:
+            clip.preset = preset
+
+        if clip.continues_previous and predecessor is not None:
+            clip.width, clip.height = predecessor.width, predecessor.height
+        else:
+            clip.width, clip.height = compute_resolution(clip.preset.megapixels, project.aspect_ratio)
+
+        clip.save(update_fields=["preset", "duration", "width", "height"])
+        predecessor = clip
+
+
+def resolve_clip_width_height(clip: Clip) -> tuple[int, int]:
+    """Width/height for `clip` right now, given its current preset,
+    continues_previous, and its project's aspect_ratio -- locked to the
+    immediate predecessor's own width/height when continuing (guarantees an
+    exact pixel match across a continuation run even if the predecessor's
+    mode resolves to different megapixels under the same quality tier),
+    otherwise computed fresh. Used when continues_previous is toggled after
+    creation (director/api.py's clip_detail() PATCH) -- unlike
+    recompute_project_resolutions(), this only ever touches one Clip.
+    """
+    if clip.continues_previous:
+        predecessor = _predecessor(clip)
+        if predecessor is not None:
+            return predecessor.width, predecessor.height
+    return compute_resolution(clip.preset.megapixels, clip.project.aspect_ratio)
+
+
+def project_requires_reference_mode(project: Project) -> bool:
+    """True once a Project has any shared resource -- see director/api.py's
+    project_resources()/clips() POST handlers: while true, every Clip in
+    the project must be mode=r2v, since only MiniMaxH3ReferenceToVideo's job
+    actually wires ref_image_N/etc (see _combined_references() below) -- a
+    t2v/i2v clip would have no way to honor a project resource's <Picture N>
+    token even though the resource is meant to be usable from any clip in
+    the project.
+    """
+    return project.resources.exists()
+
+
+def _combined_references(clip: Clip) -> list[ProjectResource | ReferenceAsset]:
+    """Every reference this Clip's render should feed into its new
+    GenerationJob, in the exact order _build_job_for_clip() copies them in
+    -- this Clip's project's shared resources first (so a "<Picture N>"
+    token means the same thing in every Clip's prompt, matching what
+    ProjectResourcesPanel shows the user -- see ClipReferenceAsset.label's
+    matching offset), then this Clip's own references appended after, per
+    kind. Mirrors generation/tasks.py's own
+    job.references.filter(kind=...).order_by("order", "id") consumption
+    order (see that module's _build_workflow_for_job()).
+    """
+    combined = []
+    for kind in (ReferenceAsset.Kind.IMAGE, ReferenceAsset.Kind.AUDIO, ReferenceAsset.Kind.VIDEO):
+        project_items = list(clip.project.resources.filter(kind=kind).order_by("order", "id"))
+        combined.extend(project_items)
+        for offset, item in enumerate(clip.references.filter(kind=kind).order_by("order", "id")):
+            item.order = len(project_items) + offset
+            combined.append(item)
+    return combined
 
 
 def _chain_run_prefix_clips(clip: Clip) -> list[Clip]:
@@ -178,7 +310,7 @@ def _build_job_for_clip(clip: Clip) -> GenerationJob:
         improved_prompt=clip.improved_prompt,
         megapixels=clip.preset.megapixels,
         steps=clip.preset.steps,
-        aspect_ratio=clip.aspect_ratio,
+        aspect_ratio=clip.project.aspect_ratio,
         width=clip.width,
         height=clip.height,
         duration_seconds=clip.duration.duration_seconds,
@@ -186,7 +318,7 @@ def _build_job_for_clip(clip: Clip) -> GenerationJob:
         continuation_params=chain_params,
     )
 
-    references = list(clip.references.all())
+    references = _combined_references(clip)
     if anchor_frame is not None:
         # Leads as the new job's first (order=0) image reference -- i2v's
         # convention is order=0 -> first_frame; r2v's is order=0 -> the
@@ -339,13 +471,17 @@ def normalize_planned_scenes(raw_scenes) -> list[dict]:
 def apply_planned_scenes(project: Project, scenes, *, replace: bool) -> list[Clip]:
     """Turns a (possibly user-edited) scene list into real Clip rows,
     appended after the project's existing clips by default, or replacing
-    them entirely when replace=True. Mirrors director/api.py's clips() POST
-    handler's default-resolution logic (first active RenderPreset/
-    RenderDuration for the mode, "16:9" unless continuing) since there's no
-    per-scene duration/aspect-ratio input here -- the user can still adjust
-    either afterward per-clip, same as any other clip. Doesn't itself
-    trigger any render.
+    them entirely when replace=True. Preset/width/height are resolved from
+    the project's own quality_label/aspect_ratio (see
+    director/api.py's clips() POST handler, which resolves the same way for
+    a manually-created clip). Doesn't itself trigger any render.
     """
+    if project_requires_reference_mode(project):
+        raise PlanError(
+            "This project has shared references -- every clip must be a reference clip, which "
+            '"Generate from script" doesn\'t support yet. Add clips manually instead.'
+        )
+
     normalized = normalize_planned_scenes(scenes)
     if not normalized:
         raise PlanError("No usable scenes to apply.")
@@ -365,17 +501,16 @@ def apply_planned_scenes(project: Project, scenes, *, replace: bool) -> list[Cli
         created: list[Clip] = []
         for scene in normalized:
             mode = scene["mode"]
-            preset = RenderPreset.objects.filter(mode=mode, is_active=True).first()
+            preset = resolve_preset_for_mode(project.quality_label, mode)
             duration = preset.durations.filter(is_active=True).first() if preset else None
             if preset is None or duration is None:
                 raise PlanError(f"No active render preset/duration is configured for mode {mode!r}.")
 
             continues_previous = scene["continues_previous"] and predecessor is not None
             if continues_previous:
-                aspect_ratio, width, height = predecessor.aspect_ratio, predecessor.width, predecessor.height
+                width, height = predecessor.width, predecessor.height
             else:
-                aspect_ratio = "16:9"
-                width, height = compute_resolution(preset.megapixels, aspect_ratio)
+                width, height = compute_resolution(preset.megapixels, project.aspect_ratio)
 
             clip = Clip.objects.create(
                 project=project,
@@ -385,7 +520,6 @@ def apply_planned_scenes(project: Project, scenes, *, replace: bool) -> list[Cli
                 prompt=scene["prompt"],
                 preset=preset,
                 duration=duration,
-                aspect_ratio=aspect_ratio,
                 width=width,
                 height=height,
             )

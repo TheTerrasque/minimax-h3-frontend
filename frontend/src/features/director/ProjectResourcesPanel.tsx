@@ -25,12 +25,19 @@ export function ProjectResourcesPanel({ project }: ProjectResourcesPanelProps) {
   const createResource = useCreateProjectResource();
   const deleteResource = useDeleteProjectResource();
 
+  // Only a reference clip's render can actually wire a shared resource in
+  // (see backend director/services.py's _combined_references()) -- adding
+  // one is rejected while any other-mode clip exists, so surface that
+  // proactively instead of letting the user hit a 400 from the add button.
+  const hasNonReferenceClips = project.clips.some((c) => c.mode !== "r2v");
+
   return (
     <fieldset className="director-resources-panel">
       <legend>Shared resources</legend>
       <p className="hint">
-        Character sheets, voice references, and world/style images or clips every clip's render
-        can draw on — insert their token (e.g. <code>&lt;Picture 1&gt;</code>) into a clip's prompt.
+        Character sheets, voice references, and world/style images or clips every reference
+        clip's render can draw on — insert their token (e.g. <code>&lt;Picture 1&gt;</code>) into
+        a clip's prompt. Adding one requires every clip in the project to be a reference clip.
       </p>
       {project.resources.length > 0 && (
         <ul className="reference-list director-resource-list">
@@ -50,27 +57,34 @@ export function ProjectResourcesPanel({ project }: ProjectResourcesPanelProps) {
           ))}
         </ul>
       )}
-      <div className="director-resource-add-row">
-        {(["image", "audio", "video"] as ReferenceKind[]).map((kind) => (
-          <DropZone
-            key={kind}
-            accept={KIND_ACCEPT[kind]}
-            className="file-slot"
-            onFiles={(files) => createResource.mutate({ projectId: project.id, kind, file: files[0] })}
-          >
-            + {KIND_LABEL[kind]}
-            <input
-              type="file"
+      {hasNonReferenceClips ? (
+        <p className="hint">
+          This project has non-reference clips — delete or convert them before adding a shared
+          reference.
+        </p>
+      ) : (
+        <div className="director-resource-add-row">
+          {(["image", "audio", "video"] as ReferenceKind[]).map((kind) => (
+            <DropZone
+              key={kind}
               accept={KIND_ACCEPT[kind]}
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) createResource.mutate({ projectId: project.id, kind, file });
-                e.target.value = "";
-              }}
-            />
-          </DropZone>
-        ))}
-      </div>
+              className="file-slot"
+              onFiles={(files) => createResource.mutate({ projectId: project.id, kind, file: files[0] })}
+            >
+              + {KIND_LABEL[kind]}
+              <input
+                type="file"
+                accept={KIND_ACCEPT[kind]}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) createResource.mutate({ projectId: project.id, kind, file });
+                  e.target.value = "";
+                }}
+              />
+            </DropZone>
+          ))}
+        </div>
+      )}
       {createResource.isError && <p className="error">Couldn't add that resource. Try again.</p>}
     </fieldset>
   );

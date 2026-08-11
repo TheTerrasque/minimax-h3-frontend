@@ -21,7 +21,7 @@ from rest_framework.response import Response
 
 from generation.api import _MAX_REFERENCE_AUDIO, _MAX_REFERENCE_IMAGES, _MAX_REFERENCE_VIDEO
 from generation.models import GenerationJob, Mode, ReferenceAsset, RenderDuration
-from generation.resolution import ASPECT_RATIO_VALUES, compute_resolution, is_valid_aspect_ratio
+from generation.resolution import ASPECT_RATIO_VALUES, DEFAULT_ASPECT_RATIO, compute_resolution, is_valid_aspect_ratio
 from integrations import assembly, comfyui, llm
 
 from . import services
@@ -37,6 +37,11 @@ class ProjectResourceSerializer(serializers.Serializer):
     kind = serializers.ChoiceField(choices=ProjectResource.Kind.choices)
     order = serializers.IntegerField()
     label = serializers.CharField(help_text="Human label if set, else the <Picture N>-style token.")
+    token_label = serializers.CharField(
+        help_text="The literal <Picture N>/<Video N>/<Audio N> token this resource maps to at "
+        "render time -- use this (not `label`, which may be a human override) when writing "
+        "prompt text or building an LLM reference_labels list."
+    )
     url = serializers.CharField(allow_null=True)
 
 
@@ -58,7 +63,6 @@ class ClipSerializer(serializers.Serializer):
     improved_prompt = serializers.CharField()
     preset_id = serializers.IntegerField()
     duration_id = serializers.IntegerField()
-    aspect_ratio = serializers.CharField()
     width = serializers.IntegerField()
     height = serializers.IntegerField()
     needs_render = serializers.BooleanField(help_text="The red-border dirty flag.")
@@ -77,6 +81,8 @@ class ProjectSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     title = serializers.CharField()
     overarching_prompt = serializers.CharField()
+    aspect_ratio = serializers.CharField(help_text="Applies to every Clip in the project -- not chosen per-clip.")
+    quality_label = serializers.CharField(help_text="The shared quality tier every Clip's own preset is resolved from.")
     created_at = serializers.DateTimeField()
     updated_at = serializers.DateTimeField()
 
@@ -117,6 +123,7 @@ def _serialize_resource(resource: ProjectResource) -> dict:
         "kind": resource.kind,
         "order": resource.order,
         "label": resource.label or resource.token_label,
+        "token_label": resource.token_label,
         "url": resource.file.url if resource.file else None,
     }
 
@@ -137,7 +144,6 @@ def _serialize_clip(clip: Clip) -> dict:
         "improved_prompt": clip.improved_prompt,
         "preset_id": clip.preset_id,
         "duration_id": clip.duration_id,
-        "aspect_ratio": clip.aspect_ratio,
         "width": clip.width,
         "height": clip.height,
         "needs_render": clip.needs_render,
@@ -158,6 +164,8 @@ def _serialize_project(project: Project, *, detail: bool = False) -> dict:
         "id": project.id,
         "title": project.title,
         "overarching_prompt": project.overarching_prompt,
+        "aspect_ratio": project.aspect_ratio,
+        "quality_label": project.quality_label,
         "created_at": project.created_at,
         "updated_at": project.updated_at,
     }
@@ -197,7 +205,23 @@ def projects(request):
 
     title = request.data.get("title", "")
     overarching_prompt = request.data.get("overarching_prompt", "")
-    project = Project.objects.create(user=request.user, title=title, overarching_prompt=overarching_prompt)
+
+    aspect_ratio = request.data.get("aspect_ratio") or DEFAULT_ASPECT_RATIO
+    if not is_valid_aspect_ratio(aspect_ratio):
+        return Response({"error": f"aspect_ratio must be one of {ASPECT_RATIO_VALUES}, or a custom W:H ratio."}, status=400)
+
+    available_labels = services.available_quality_labels()
+    quality_label = request.data.get("quality_label") or (available_labels[0] if available_labels else "")
+    if quality_label and quality_label not in available_labels:
+        return Response({"error": f"quality_label must be one of {available_labels}."}, status=400)
+
+    project = Project.objects.create(
+        user=request.user,
+        title=title,
+        overarching_prompt=overarching_prompt,
+        aspect_ratio=aspect_ratio,
+        quality_label=quality_label,
+    )
     return Response(_serialize_project(project, detail=True), status=201)
 
 
@@ -211,7 +235,8 @@ def projects(request):
     methods=["PATCH"],
     summary="Update a Director project",
     description="Changing overarching_prompt marks every Clip in the project dirty -- every "
-    "Clip's render depends on it.",
+    "Clip's render depends on it. Changing aspect_ratio/quality_label additionally recomputes "
+    "every Clip's preset/width/height (see director/services.py's recompute_project_resolutions).",
     responses={200: ProjectDetailSerializer, 404: OpenApiResponse(description="Not found.")},
     tags=["director"],
 )
@@ -231,13 +256,34 @@ def project_detail(request, project_id: int):
 
     if request.method == "PATCH":
         dirty = False
+        resolution_changed = False
         if "title" in request.data:
             project.title = request.data["title"]
         if "overarching_prompt" in request.data:
             project.overarching_prompt = request.data["overarching_prompt"]
             dirty = True
+        if "aspect_ratio" in request.data:
+            aspect_ratio = request.data["aspect_ratio"]
+            if not is_valid_aspect_ratio(aspect_ratio):
+                return Response(
+                    {"error": f"aspect_ratio must be one of {ASPECT_RATIO_VALUES}, or a custom W:H ratio."},
+                    status=400,
+                )
+            if aspect_ratio != project.aspect_ratio:
+                project.aspect_ratio = aspect_ratio
+                resolution_changed = True
+        if "quality_label" in request.data:
+            quality_label = request.data["quality_label"]
+            available_labels = services.available_quality_labels()
+            if quality_label not in available_labels:
+                return Response({"error": f"quality_label must be one of {available_labels}."}, status=400)
+            if quality_label != project.quality_label:
+                project.quality_label = quality_label
+                resolution_changed = True
         project.save()
-        if dirty:
+        if resolution_changed:
+            services.recompute_project_resolutions(project)
+        if dirty or resolution_changed:
             services.mark_project_dirty(project)
         return Response(_serialize_project(project, detail=True))
 
@@ -250,8 +296,10 @@ def project_detail(request, project_id: int):
 @extend_schema(
     methods=["POST"],
     summary="Add a project resource (character sheet / voice / world reference)",
-    description="Marks every Clip in the project dirty -- see project_detail's PATCH.",
-    responses={201: ProjectResourceSerializer},
+    description="Marks every Clip in the project dirty -- see project_detail's PATCH. Rejected "
+    "if the project has any non-reference (t2v/i2v) clip -- only r2v clips can actually wire a "
+    "shared resource into a render, so every clip must be r2v while one is attached.",
+    responses={201: ProjectResourceSerializer, 400: ErrorResponseSerializer},
     tags=["director"],
 )
 @api_view(["GET", "POST"])
@@ -264,6 +312,14 @@ def project_resources(request, project_id: int):
     kind = request.data.get("kind")
     if kind not in ProjectResource.Kind.values:
         return Response({"error": f"kind must be one of {ProjectResource.Kind.values}"}, status=400)
+    if project.clips.exclude(mode=Mode.REFERENCE_TO_VIDEO).exists():
+        return Response(
+            {
+                "error": "This project has non-reference clips -- every clip must be a reference "
+                "clip while shared references are attached. Remove or delete them first."
+            },
+            status=400,
+        )
     file = request.FILES.get("file")
     if file is None:
         return Response({"error": "file is required."}, status=400)
@@ -292,10 +348,6 @@ def resource_detail(request, resource_id: int):
 class CreateClipRequestSerializer(serializers.Serializer):
     mode = serializers.ChoiceField(choices=Mode.choices)
     duration_id = serializers.IntegerField()
-    aspect_ratio = serializers.CharField(
-        required=False,
-        help_text="Ignored (inherited from the predecessor) when continues_previous is set.",
-    )
     continues_previous = serializers.BooleanField(required=False, default=False)
     prompt = serializers.CharField(required=False, allow_blank=True)
     reference_images = serializers.ListField(child=serializers.FileField(), required=False)
@@ -304,32 +356,34 @@ class CreateClipRequestSerializer(serializers.Serializer):
 
 
 def _resolve_clip_duration_and_resolution(request, project: Project, mode: str, continues_previous: bool):
-    """Returns (duration, aspect_ratio, width, height) or a Response to
-    return directly on validation failure -- same "value-or-Response"
-    pattern generation/api.py's _validate_mode() uses."""
-    duration = (
-        RenderDuration.objects.filter(
-            id=request.data.get("duration_id"), preset__mode=mode, is_active=True, preset__is_active=True
-        )
-        .select_related("preset")
-        .first()
-    )
+    """Returns (preset, duration, width, height) or a Response to return
+    directly on validation failure -- same "value-or-Response" pattern
+    generation/api.py's _validate_mode() uses. Quality/aspect ratio are
+    project-wide (Project.quality_label/aspect_ratio) -- this Clip's own
+    preset/width/height are just derived from them, not independently
+    chosen at creation time.
+    """
+    preset = services.resolve_preset_for_mode(project.quality_label, mode)
+    if preset is None:
+        return Response({"error": f"No active render preset is configured for mode {mode!r}."}, status=400)
+
+    duration = RenderDuration.objects.filter(
+        id=request.data.get("duration_id"), preset=preset, is_active=True
+    ).first()
     if duration is None:
         return Response(
-            {"error": "duration_id must reference an active duration option for this mode."}, status=400
+            {"error": "duration_id must reference an active duration option for this project's quality tier."},
+            status=400,
         )
 
     if continues_previous:
         predecessor = project.clips.order_by("-order").first()
         if predecessor is None:
             return Response({"error": "continues_previous requires an existing predecessor clip."}, status=400)
-        return duration, predecessor.aspect_ratio, predecessor.width, predecessor.height
+        return preset, duration, predecessor.width, predecessor.height
 
-    aspect_ratio = request.data.get("aspect_ratio")
-    if not is_valid_aspect_ratio(aspect_ratio):
-        return Response({"error": f"aspect_ratio must be one of {ASPECT_RATIO_VALUES}, or a custom W:H ratio."}, status=400)
-    width, height = compute_resolution(duration.preset.megapixels, aspect_ratio)
-    return duration, aspect_ratio, width, height
+    width, height = compute_resolution(preset.megapixels, project.aspect_ratio)
+    return preset, duration, width, height
 
 
 @extend_schema(
@@ -353,6 +407,12 @@ def clips(request, project_id: int):
     if mode not in Mode.values:
         return Response({"error": f"mode must be one of {Mode.values}"}, status=400)
 
+    if mode != Mode.REFERENCE_TO_VIDEO and services.project_requires_reference_mode(project):
+        return Response(
+            {"error": "This project has shared references -- every clip must be a reference clip."},
+            status=400,
+        )
+
     continues_previous = str(request.data.get("continues_previous", "")).lower() in ("1", "true", "yes", "on")
     if continues_previous and mode not in CONTINUATION_CAPABLE_MODES:
         return Response(
@@ -363,7 +423,7 @@ def clips(request, project_id: int):
     resolved = _resolve_clip_duration_and_resolution(request, project, mode, continues_previous)
     if isinstance(resolved, Response):
         return resolved
-    duration, aspect_ratio, width, height = resolved
+    preset, duration, width, height = resolved
 
     reference_images = request.FILES.getlist("reference_images")
     reference_audio = request.FILES.getlist("reference_audio")
@@ -386,9 +446,8 @@ def clips(request, project_id: int):
             continues_previous=continues_previous,
             mode=mode,
             prompt=request.data.get("prompt", ""),
-            preset=duration.preset,
+            preset=preset,
             duration=duration,
-            aspect_ratio=aspect_ratio,
             width=width,
             height=height,
         )
@@ -412,7 +471,10 @@ def clips(request, project_id: int):
     methods=["PATCH"],
     summary="Edit a clip",
     description="Any render-affecting field change dirties this clip and cascades forward through "
-    "directly-chained continuations (see director/services.py's mark_dirty_cascade).",
+    "directly-chained continuations (see director/services.py's mark_dirty_cascade). Quality "
+    "(preset) and aspect ratio aren't editable here -- they're project-wide, see "
+    "project_detail's PATCH -- only duration_id (length within the clip's already-resolved "
+    "quality tier), prompt/improved_prompt, and continues_previous can change.",
     responses={200: ClipSerializer, 400: ErrorResponseSerializer, 404: OpenApiResponse(description="Not found.")},
     tags=["director"],
 )
@@ -437,6 +499,7 @@ def clip_detail(request, clip_id: int):
     if request.method == "PATCH":
         editable_fields = {"prompt", "improved_prompt", "continues_previous"}
         changed = False
+        resolution_may_change = False
         for field in editable_fields:
             if field in request.data:
                 value = request.data[field]
@@ -447,55 +510,29 @@ def clip_detail(request, clip_id: int):
                             {"error": f"continues_previous is only supported for modes {sorted(CONTINUATION_CAPABLE_MODES)}."},
                             status=400,
                         )
+                    resolution_may_change = True
                 setattr(clip, field, value)
                 changed = True
 
-        if "duration_id" in request.data or "aspect_ratio" in request.data:
-            duration = clip.duration
-            if "duration_id" in request.data:
-                duration = (
-                    RenderDuration.objects.filter(
-                        id=request.data.get("duration_id"),
-                        preset__mode=clip.mode,
-                        is_active=True,
-                        preset__is_active=True,
-                    )
-                    .select_related("preset")
-                    .first()
+        if "duration_id" in request.data:
+            # Quality (preset) is project-wide, not editable per-clip here
+            # -- see Project.quality_label -- so this only ever swaps
+            # length within the clip's already-resolved preset.
+            duration = RenderDuration.objects.filter(
+                id=request.data.get("duration_id"), preset=clip.preset, is_active=True
+            ).first()
+            if duration is None:
+                return Response(
+                    {"error": "duration_id must reference an active duration option for this clip's quality tier."},
+                    status=400,
                 )
-                if duration is None:
-                    return Response(
-                        {"error": "duration_id must reference an active duration option for this clip's mode."},
-                        status=400,
-                    )
-
-            if clip.continues_previous:
-                # width/height/aspect_ratio stay exactly as inherited at
-                # creation -- MiniMaxH3ChainPlan's width/height apply to
-                # every scene in a run (see extras.md#contex-loop), so
-                # only duration/preset (length/steps) may change here, not
-                # resolution.
-                if "aspect_ratio" in request.data and request.data["aspect_ratio"] != clip.aspect_ratio:
-                    return Response(
-                        {"error": "aspect_ratio/resolution is locked to the predecessor while continues_previous is set."},
-                        status=400,
-                    )
-                clip.preset = duration.preset
-                clip.duration = duration
-            else:
-                aspect_ratio = request.data.get("aspect_ratio", clip.aspect_ratio)
-                if not is_valid_aspect_ratio(aspect_ratio):
-                    return Response(
-                        {"error": f"aspect_ratio must be one of {ASPECT_RATIO_VALUES}, or a custom W:H ratio."},
-                        status=400,
-                    )
-                width, height = compute_resolution(duration.preset.megapixels, aspect_ratio)
-                clip.preset = duration.preset
-                clip.duration = duration
-                clip.aspect_ratio = aspect_ratio
-                clip.width = width
-                clip.height = height
+            clip.duration = duration
             changed = True
+
+        if resolution_may_change:
+            # continues_previous just changed -- re-lock (or release)
+            # width/height to/from the immediate predecessor's own values.
+            clip.width, clip.height = services.resolve_clip_width_height(clip)
 
         if changed:
             clip.save()
@@ -676,6 +713,14 @@ def plan_project(request, project_id: int):
     project = _get_project(request, project_id)
     if not settings.LLM_ENABLED:
         return Response({"error": "No LLM is configured."}, status=503)
+    if services.project_requires_reference_mode(project):
+        return Response(
+            {
+                "error": "This project has shared references -- \"Generate from script\" doesn't "
+                "support reference clips yet. Add clips manually instead."
+            },
+            status=400,
+        )
 
     idea_text = request.data.get("idea_text", "")
     if not idea_text.strip():

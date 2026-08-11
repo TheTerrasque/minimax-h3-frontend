@@ -8,6 +8,10 @@ export interface ProjectResource {
   kind: ReferenceKind;
   order: number;
   label: string; // human label if set, else the <Picture N>-style token
+  // The literal <Picture N>/<Video N>/<Audio N> token this resource maps
+  // to at render time -- unlike `label`, never a human override. Use this
+  // when building an LLM reference_labels list.
+  token_label: string;
   url: string | null;
 }
 
@@ -33,7 +37,6 @@ export interface Clip {
   improved_prompt: string;
   preset_id: number;
   duration_id: number;
-  aspect_ratio: string;
   width: number;
   height: number;
   // The red-border dirty flag -- true whenever this clip's current render
@@ -56,6 +59,12 @@ export interface Project {
   id: number;
   title: string;
   overarching_prompt: string;
+  // Applies to every Clip in the project -- not chosen per-clip (see
+  // backend director/models.py's Project docstring).
+  aspect_ratio: string;
+  // The shared quality tier every Clip's own (per-mode) preset is
+  // resolved from -- also project-wide, not chosen per-clip.
+  quality_label: string;
   created_at: string;
   updated_at: string;
 }

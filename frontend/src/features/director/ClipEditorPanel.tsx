@@ -38,10 +38,23 @@ interface ClipEditorPanelProps {
   // with the rest of the project (see backend integrations/llm.py's
   // _extra_context_note()).
   overarchingPrompt: string;
+  // <Picture N>/<Video N>/<Audio N> tokens for the project's own shared
+  // resources (see ProjectResourcesPanel) -- these render before this
+  // clip's own references (see backend director/services.py's
+  // _combined_references()), so they're included alongside this clip's
+  // own reference labels below, not on their own.
+  projectResourceLabels: string[];
   onClose: () => void;
 }
 
-export function ClipEditorPanel({ projectId, clip, isFirstClip, overarchingPrompt, onClose }: ClipEditorPanelProps) {
+export function ClipEditorPanel({
+  projectId,
+  clip,
+  isFirstClip,
+  overarchingPrompt,
+  projectResourceLabels,
+  onClose,
+}: ClipEditorPanelProps) {
   const config = useConfig();
   const presets = usePresets(clip.mode);
   const updateClip = useUpdateClip();
@@ -69,15 +82,13 @@ export function ClipEditorPanel({ projectId, clip, isFirstClip, overarchingPromp
   }, [clip.id, clip.prompt]);
 
   const canContinue = CONTINUATION_CAPABLE_MODES.has(clip.mode) && !isFirstClip;
-  const referenceLabels = clip.references.map((r) => r.label);
+  // Project resources render before this clip's own references (see
+  // backend director/services.py's _combined_references()), so their
+  // tokens come first here too -- keeps this list in the same order the
+  // <Picture N>/etc numbers actually mean.
+  const referenceLabels = [...projectResourceLabels, ...clip.references.map((r) => r.label)];
 
   const currentPreset = presets.data?.find((p) => p.id === clip.preset_id) ?? null;
-  // Quality (megapixels) is locked while continues_previous -- resolution
-  // is inherited from the predecessor regardless of preset (see backend
-  // director/api.py's clip_detail PATCH: MiniMaxH3ChainPlan's width/height
-  // apply to every scene in a run, extras.md#contex-loop) -- so only this
-  // clip's own preset's length options are offered, not a full tier switch.
-  const availablePresets = clip.continues_previous ? (currentPreset ? [currentPreset] : []) : (presets.data ?? []);
   const durations = currentPreset?.durations ?? [];
   const selectedDuration = durations.find((d) => d.id === clip.duration_id) ?? null;
   const selectedDurationIndex = selectedDuration ? durations.indexOf(selectedDuration) : 0;
@@ -129,18 +140,8 @@ export function ClipEditorPanel({ projectId, clip, isFirstClip, overarchingPromp
     setChatOpen(false);
   }
 
-  async function handlePresetChange(presetId: number) {
-    const preset = availablePresets.find((p) => p.id === presetId);
-    const nextDuration = preset?.durations[0];
-    if (nextDuration) await updateClip.mutateAsync({ projectId, clipId: clip.id, durationId: nextDuration.id });
-  }
-
   async function handleDurationChange(durationId: number) {
     await updateClip.mutateAsync({ projectId, clipId: clip.id, durationId });
-  }
-
-  async function handleAspectRatioChange(aspectRatio: string) {
-    await updateClip.mutateAsync({ projectId, clipId: clip.id, aspectRatio });
   }
 
   async function handleContinuesToggle(value: boolean) {
@@ -228,27 +229,9 @@ export function ClipEditorPanel({ projectId, clip, isFirstClip, overarchingPromp
         </fieldset>
 
         <div className="toolbar">
-          {clip.continues_previous ? (
-            <p className="hint clip-editor-locked-note">
-              Quality/resolution locked to the predecessor while continuing it — only length can change here.
-            </p>
-          ) : (
-            <label className="toolbar-control">
-              <span>Quality</span>
-              <select
-                value={currentPreset?.id ?? ""}
-                onChange={(e) => void handlePresetChange(Number(e.target.value))}
-                disabled={!availablePresets.length}
-              >
-                {availablePresets.map((preset) => (
-                  <option key={preset.id} value={preset.id}>
-                    {preset.label} ({preset.megapixels}MP{preset.is_draft ? ", draft" : ""})
-                  </option>
-                ))}
-              </select>
-            </label>
-          )}
-
+          <p className="hint clip-editor-locked-note">
+            Quality and aspect ratio are set for the whole project — see the project board.
+          </p>
           <label className="toolbar-control toolbar-control-wide">
             <span>
               Length: {selectedDuration ? `${selectedDuration.duration_seconds}s` : "—"}
@@ -267,22 +250,6 @@ export function ClipEditorPanel({ projectId, clip, isFirstClip, overarchingPromp
               }}
             />
           </label>
-
-          {!clip.continues_previous && (
-            <label className="toolbar-control">
-              <span>Aspect ratio</span>
-              <select value={clip.aspect_ratio} onChange={(e) => void handleAspectRatioChange(e.target.value)}>
-                {config.data?.aspect_ratios.map((ratio) => (
-                  <option key={ratio.value} value={ratio.value}>
-                    {ratio.label}
-                  </option>
-                ))}
-                {!config.data?.aspect_ratios.some((r) => r.value === clip.aspect_ratio) && (
-                  <option value={clip.aspect_ratio}>{clip.aspect_ratio}</option>
-                )}
-              </select>
-            </label>
-          )}
         </div>
 
         <label className="clip-editor-continues-toggle">

@@ -35,10 +35,15 @@ export function useDirectorProject(projectId: number | null) {
 export function useCreateDirectorProject() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (input: { title?: string; overarchingPrompt?: string }) =>
+    mutationFn: (input: { title?: string; overarchingPrompt?: string; aspectRatio?: string; qualityLabel?: string }) =>
       apiFetch<ProjectDetail>("/director/projects/", {
         method: "POST",
-        body: JSON.stringify({ title: input.title, overarching_prompt: input.overarchingPrompt }),
+        body: JSON.stringify({
+          title: input.title,
+          overarching_prompt: input.overarchingPrompt,
+          aspect_ratio: input.aspectRatio,
+          quality_label: input.qualityLabel,
+        }),
       }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["director-projects"] });
@@ -53,14 +58,25 @@ export function useUpdateDirectorProject() {
       projectId,
       title,
       overarchingPrompt,
+      aspectRatio,
+      qualityLabel,
     }: {
       projectId: number;
       title?: string;
       overarchingPrompt?: string;
+      // Project-wide -- changing either recomputes every clip's
+      // preset/width/height and marks the whole project dirty.
+      aspectRatio?: string;
+      qualityLabel?: string;
     }) =>
       apiFetch<ProjectDetail>(`/director/projects/${projectId}/`, {
         method: "PATCH",
-        body: JSON.stringify({ title, overarching_prompt: overarchingPrompt }),
+        body: JSON.stringify({
+          title,
+          overarching_prompt: overarchingPrompt,
+          aspect_ratio: aspectRatio,
+          quality_label: qualityLabel,
+        }),
       }),
     onSuccess: (_data, { projectId }) => {
       void queryClient.invalidateQueries({ queryKey: ["director-project", projectId] });
@@ -123,7 +139,6 @@ export interface CreateClipInput {
   projectId: number;
   mode: Mode;
   durationId: number;
-  aspectRatio?: string;
   continuesPrevious?: boolean;
   prompt?: string;
   referenceImages?: File[];
@@ -138,7 +153,6 @@ export function useCreateClip() {
       const form = new FormData();
       form.set("mode", input.mode);
       form.set("duration_id", String(input.durationId));
-      if (input.aspectRatio) form.set("aspect_ratio", input.aspectRatio);
       if (input.continuesPrevious) form.set("continues_previous", "true");
       if (input.prompt) form.set("prompt", input.prompt);
       for (const f of input.referenceImages ?? []) form.append("reference_images", f);
@@ -159,7 +173,6 @@ export interface UpdateClipInput {
   improvedPrompt?: string;
   continuesPrevious?: boolean;
   durationId?: number;
-  aspectRatio?: string;
 }
 
 export function useUpdateClip() {
@@ -171,7 +184,6 @@ export function useUpdateClip() {
       if (input.improvedPrompt !== undefined) body.improved_prompt = input.improvedPrompt;
       if (input.continuesPrevious !== undefined) body.continues_previous = input.continuesPrevious;
       if (input.durationId !== undefined) body.duration_id = input.durationId;
-      if (input.aspectRatio !== undefined) body.aspect_ratio = input.aspectRatio;
       return apiFetch<Clip>(`/director/clips/${input.clipId}/`, {
         method: "PATCH",
         body: JSON.stringify(body),
