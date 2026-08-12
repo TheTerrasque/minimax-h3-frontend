@@ -83,6 +83,9 @@ export interface ProjectDetail extends Project {
   // ProjectBoard's Export button. Not auto-cleared by later clip edits, so
   // a present URL doesn't guarantee it reflects the project's current state.
   assembled_video_url: string | null;
+  // The idea/script text last submitted to "Generate from script", if any
+  // -- purely informational, kept so it can be reviewed or reused later.
+  script_text: string;
 }
 
 // One proposed scene from POST .../plan/ -- a preview, not yet a real Clip.
@@ -91,6 +94,10 @@ export interface ProjectDetail extends Project {
 export interface PlannedScene {
   mode: Mode;
   continues_previous: boolean;
+  // Ignored server-side for a scene that continues_previous -- it's
+  // locked to match its chained run's own duration instead (see
+  // backend director/services.py's apply_planned_scenes()).
+  duration_seconds: number | null;
   prompt: string;
   notes: string;
 }

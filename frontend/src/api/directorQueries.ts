@@ -64,6 +64,7 @@ export function useUpdateDirectorProject() {
       overarchingPrompt,
       aspectRatio,
       qualityLabel,
+      scriptText,
     }: {
       projectId: number;
       title?: string;
@@ -72,6 +73,8 @@ export function useUpdateDirectorProject() {
       // preset/width/height and marks the whole project dirty.
       aspectRatio?: string;
       qualityLabel?: string;
+      // Purely informational -- doesn't affect any clip.
+      scriptText?: string;
     }) =>
       apiFetch<ProjectDetail>(`/director/projects/${projectId}/`, {
         method: "PATCH",
@@ -80,6 +83,7 @@ export function useUpdateDirectorProject() {
           overarching_prompt: overarchingPrompt,
           aspect_ratio: aspectRatio,
           quality_label: qualityLabel,
+          script_text: scriptText,
         }),
       }),
     onSuccess: (_data, { projectId }) => {
@@ -333,10 +337,22 @@ export function usePlanFromScript() {
 export function useApplyPlan() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ projectId, scenes, replace }: { projectId: number; scenes: PlannedScene[]; replace: boolean }) =>
+    mutationFn: ({
+      projectId,
+      scenes,
+      replace,
+      ideaText,
+    }: {
+      projectId: number;
+      scenes: PlannedScene[];
+      replace: boolean;
+      // Saved onto the project as script_text for later review -- see
+      // backend director/api.py's apply_plan().
+      ideaText?: string;
+    }) =>
       apiFetch<Clip[]>(`/director/projects/${projectId}/plan/apply/`, {
         method: "POST",
-        body: JSON.stringify({ scenes, replace }),
+        body: JSON.stringify({ scenes, replace, idea_text: ideaText }),
       }),
     onSuccess: (_data, { projectId }) => {
       void queryClient.invalidateQueries({ queryKey: ["director-project", projectId] });

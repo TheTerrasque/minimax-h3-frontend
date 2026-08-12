@@ -13,6 +13,11 @@ interface ScriptPlanModalProps {
   // Non-empty here implies every generated scene will be forced to a
   // reference clip -- see project_requires_reference_mode().
   projectResources: ProjectResource[];
+  // Pre-fills the textarea with the project's last-saved script, if any
+  // (see backend Project.script_text) -- lets "Generate from script" be
+  // reopened to review/regenerate from what was used before instead of
+  // starting from a blank box.
+  initialIdeaText: string;
   onClose: () => void;
 }
 
@@ -22,11 +27,17 @@ interface ScriptPlanModalProps {
 // purpose (propose, then a separate confirm) rather than creating clips
 // straight from the LLM's reply -- an unreviewed AI-generated sequence is
 // exactly the kind of thing a user should get to look at first.
-export function ScriptPlanModal({ projectId, hasExistingClips, projectResources, onClose }: ScriptPlanModalProps) {
+export function ScriptPlanModal({
+  projectId,
+  hasExistingClips,
+  projectResources,
+  initialIdeaText,
+  onClose,
+}: ScriptPlanModalProps) {
   const planFromScript = usePlanFromScript();
   const applyPlan = useApplyPlan();
 
-  const [ideaText, setIdeaText] = useState("");
+  const [ideaText, setIdeaText] = useState(initialIdeaText);
   const [scenes, setScenes] = useState<PlannedScene[] | null>(null);
   const [replace, setReplace] = useState(false);
 
@@ -38,7 +49,7 @@ export function ScriptPlanModal({ projectId, hasExistingClips, projectResources,
 
   async function handleApply() {
     if (!scenes || scenes.length === 0) return;
-    await applyPlan.mutateAsync({ projectId, scenes, replace });
+    await applyPlan.mutateAsync({ projectId, scenes, replace, ideaText });
     onClose();
   }
 
@@ -111,6 +122,26 @@ export function ScriptPlanModal({ projectId, hasExistingClips, projectResources,
                     <span className="plan-scene-number">Scene {index + 1}</span>
                     <span className="hint">{MODE_LABELS[scene.mode]}</span>
                     {scene.continues_previous && <span className="hint">continues previous</span>}
+                    <label
+                      className="plan-scene-duration"
+                      title={
+                        scene.continues_previous
+                          ? "Locked to match the chained run's first scene -- edit that scene's duration instead."
+                          : "Requested clip length in seconds; matched to the nearest available option."
+                      }
+                    >
+                      <span className="hint">sec</span>
+                      <input
+                        type="number"
+                        min={1}
+                        step={1}
+                        value={scene.duration_seconds ?? ""}
+                        disabled={scene.continues_previous}
+                        onChange={(e) =>
+                          updateScene(index, { duration_seconds: e.target.value ? Number(e.target.value) : null })
+                        }
+                      />
+                    </label>
                     <button type="button" className="link-button" onClick={() => removeScene(index)}>
                       Remove
                     </button>

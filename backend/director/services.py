@@ -559,7 +559,8 @@ def normalize_planned_scenes(raw_scenes, *, require_reference_mode: bool = False
     """Coerces integrations.llm.plan_scenes()'s raw reply -- or a scene list
     a user has since hand-edited in the preview step -- into the exact
     shape apply_planned_scenes() and the API's response both expect:
-    [{"mode": str, "continues_previous": bool, "prompt": str, "notes": str}, ...].
+    [{"mode": str, "continues_previous": bool, "duration_seconds": float | None,
+    "prompt": str, "notes": str}, ...].
 
     The LLM's JSON is untrusted input, not a contract: silently drops
     entries with no usable prompt and repairs everything else (unknown/
@@ -588,10 +589,18 @@ def normalize_planned_scenes(raw_scenes, *, require_reference_mode: bool = False
             mode = Mode.REFERENCE_TO_VIDEO
         else:
             mode = raw.get("mode") if raw.get("mode") in _PLANNABLE_MODES else Mode.TEXT_TO_VIDEO
+        raw_duration = raw.get("duration_seconds")
+        try:
+            duration_seconds = float(raw_duration) if raw_duration is not None else None
+        except (TypeError, ValueError):
+            duration_seconds = None
+        if duration_seconds is not None and duration_seconds <= 0:
+            duration_seconds = None
         scenes.append(
             {
                 "mode": mode,
                 "continues_previous": bool(raw.get("continues_previous")) and mode in CONTINUATION_CAPABLE_MODES,
+                "duration_seconds": duration_seconds,
                 "prompt": prompt,
                 "notes": str(raw.get("notes", "")).strip(),
             }
@@ -627,8 +636,13 @@ def apply_planned_scenes(project: Project, scenes, *, replace: bool) -> list[Cli
         for scene in normalized:
             mode = scene["mode"]
             preset = resolve_preset_for_mode(project.quality_label, mode)
-            duration = preset.durations.filter(is_active=True).first() if preset else None
-            if preset is None or duration is None:
+            if preset is None:
+                raise PlanError(f"No active render preset/duration is configured for mode {mode!r}.")
+            requested_seconds = scene.get("duration_seconds")
+            duration = (_nearest_duration(preset, requested_seconds) if requested_seconds else None) or (
+                preset.durations.filter(is_active=True).first()
+            )
+            if duration is None:
                 raise PlanError(f"No active render preset/duration is configured for mode {mode!r}.")
 
             continues_previous = scene["continues_previous"] and predecessor is not None

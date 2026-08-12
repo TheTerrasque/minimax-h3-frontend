@@ -15,6 +15,18 @@ clip. A longer continuous action should instead become several
 consecutive scenes chained together with `continues_previous` (see
 below), each covering the next beat of that same continuous take.
 
+**Chaining is the default for consecutive beats in the same shot, not
+an exception.** If two beats happen back-to-back in the same place with
+no meaningful jump in time, location, or camera angle — e.g. a
+character walking somewhere and then arriving, or picking something up
+and then using it — write them as separate scenes chained with
+`continues_previous: true`, not as independent hard-cut scenes. Reserve
+`continues_previous: false` for genuine cuts: a new location, a time
+skip, or a deliberate change of angle/subject. A script with several
+beats of continuous action should therefore produce runs of two or more
+chained scenes, not a flat sequence of hard cuts — don't default to
+every scene being its own isolated shot.
+
 ## 2. Continuity between scenes
 
 Two adjacent scenes can either be a hard cut (a new, independent shot)
@@ -46,11 +58,21 @@ For each scene, set:
   from the immediately preceding scene as one unbroken take. (If
   reference tokens are listed as available to you, ignore this bullet —
   see section 3.5 below instead: every scene uses `"r2v"` there.)
-- `"continues_previous"`: `true` only when `mode` supports continuing
+- `"continues_previous"`: `true` whenever `mode` supports continuing
   (`"i2v"` or `"r2v"`) AND this scene directly continues the shot
-  immediately before it with no cut. Always `false` for the very first
-  scene, and always `false` whenever there's a cut to a new
-  shot/angle/moment.
+  immediately before it with no cut — this should be the common case for
+  consecutive beats of the same action (see section 1). Always `false`
+  for the very first scene, and always `false` whenever there's a cut to
+  a new shot/angle/moment.
+- `"duration_seconds"`: how many seconds this beat needs, typically
+  3-8. Give a fast, simple beat (a glance, a single line, a short
+  gesture) the low end; give a beat with more physical action or
+  dialogue more time. Note that every scene chained together with
+  `continues_previous: true` actually renders at the *same* duration as
+  the first scene in that chained run (physical continuity requires a
+  fixed length per run) — so set the first scene of a run to a duration
+  that suits the whole run reasonably well, since later scenes in that
+  same run will inherit it regardless of what you put here.
 
 ## 3. Writing each scene's prompt (no shared references)
 
@@ -110,7 +132,32 @@ wrapping the array is fine; nothing else is). Each object:
 {
   "mode": "t2v",
   "continues_previous": false,
+  "duration_seconds": 5,
   "prompt": "integrated_multimodal_description: ...\n\noverall_soundscape: ...\n\nnon_diegetic_music: ...",
   "notes": "One short sentence describing this scene's role in the story, for the human reviewing the draft."
 }
+```
+
+Example of two consecutive beats of the same continuous action, correctly
+chained rather than cut (note the second scene's `mode`/`continues_previous`,
+and that its prompt describes only what changes, still in the same angle
+and setting):
+
+```json
+[
+  {
+    "mode": "t2v",
+    "continues_previous": false,
+    "duration_seconds": 5,
+    "prompt": "integrated_multimodal_description: ...\n\noverall_soundscape: ...\n\nnon_diegetic_music: N/A",
+    "notes": "Mara starts climbing the lighthouse stairs."
+  },
+  {
+    "mode": "i2v",
+    "continues_previous": true,
+    "duration_seconds": 5,
+    "prompt": "integrated_multimodal_description: ...\n\noverall_soundscape: ...\n\nnon_diegetic_music: N/A",
+    "notes": "She keeps climbing and reaches the top, same unbroken shot."
+  }
+]
 ```

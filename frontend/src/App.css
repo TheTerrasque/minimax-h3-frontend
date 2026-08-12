@@ -1868,6 +1868,16 @@ select {
   margin-left: auto;
 }
 
+.plan-scene-duration {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.plan-scene-duration input {
+  width: 50px;
+}
+
 .plan-scene-notes {
   margin: 4px 0 0;
 }

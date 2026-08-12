@@ -102,11 +102,21 @@ class ProjectDetailSerializer(ProjectSerializer):
     resources = ProjectResourceSerializer(many=True)
     clips = ClipSerializer(many=True)
     assembled_video_url = serializers.CharField(allow_null=True)
+    script_text = serializers.CharField(
+        allow_blank=True, help_text="The script/idea text last used by 'Generate from script', if any."
+    )
 
 
 class PlannedSceneSerializer(serializers.Serializer):
     mode = serializers.ChoiceField(choices=Mode.choices)
     continues_previous = serializers.BooleanField()
+    duration_seconds = serializers.FloatField(
+        required=False,
+        allow_null=True,
+        help_text="Requested clip length; matched to the nearest available RenderDuration when "
+        "applied. Ignored for a scene that continues_previous -- it's locked to its run's own "
+        "duration instead.",
+    )
     prompt = serializers.CharField()
     notes = serializers.CharField(allow_blank=True, required=False)
 
@@ -125,6 +135,12 @@ class ApplyPlanRequestSerializer(serializers.Serializer):
         required=False,
         default=False,
         help_text="Delete all existing clips first instead of appending after them.",
+    )
+    idea_text = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        help_text="The script/idea text these scenes were generated from, if any -- saved onto "
+        "the project as Project.script_text for later review, purely informational.",
     )
 
 
@@ -197,6 +213,7 @@ def _serialize_project(project: Project, *, detail: bool = False) -> dict:
         data["resources"] = [_serialize_resource(r) for r in project.resources.all()]
         data["clips"] = [_serialize_clip(c) for c in project.clips.select_related("current_job").all()]
         data["assembled_video_url"] = project.assembled_video_file.url if project.assembled_video_file else None
+        data["script_text"] = project.script_text
     return data
 
 
@@ -299,6 +316,8 @@ def project_detail(request, project_id: int):
         resolution_changed = False
         if "title" in request.data:
             project.title = request.data["title"]
+        if "script_text" in request.data:
+            project.script_text = request.data["script_text"]
         if "overarching_prompt" in request.data:
             project.overarching_prompt = request.data["overarching_prompt"]
             dirty = True
@@ -931,11 +950,16 @@ def apply_plan(request, project_id: int):
     if not isinstance(scenes, list) or not scenes:
         return Response({"error": "scenes (non-empty array) is required."}, status=400)
     replace = bool(request.data.get("replace", False))
+    idea_text = request.data.get("idea_text", "")
 
     try:
         services.apply_planned_scenes(project, scenes, replace=replace)
     except services.PlanError as exc:
         return Response({"error": str(exc)}, status=400)
+
+    if idea_text.strip():
+        project.script_text = idea_text
+        project.save(update_fields=["script_text"])
 
     return Response([_serialize_clip(c) for c in project.clips.select_related("current_job")], status=201)
 

@@ -76,6 +76,13 @@ class Project(models.Model):
         "reasoning as aspect_ratio above: quality is a whole-project decision here, not a "
         "per-clip one.",
     )
+    script_text = models.TextField(
+        blank=True,
+        default="",
+        help_text="The script/idea text last submitted to 'Generate from script' (see "
+        "director/api.py's apply_plan()) -- kept so the source material can be reviewed or "
+        "reused later. Not itself used at render time.",
+    )
     assembled_video_file = models.FileField(
         upload_to=project_assembled_video_upload_path,
         blank=True,

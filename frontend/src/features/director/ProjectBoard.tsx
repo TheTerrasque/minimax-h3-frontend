@@ -294,7 +294,15 @@ export function ProjectBoard() {
           <ProjectResourcesPanel project={project.data} />
 
           <div className="director-board-actions">
-            <button type="button" onClick={() => setPlanModalOpen(true)}>
+            <button
+              type="button"
+              onClick={() => setPlanModalOpen(true)}
+              title={
+                project.data.script_text.trim()
+                  ? "Reopens with the script last used to generate this project's clips"
+                  : undefined
+              }
+            >
               Generate from script…
             </button>
             {config.data?.llm_enabled && (
@@ -410,6 +418,7 @@ export function ProjectBoard() {
           projectId={projectId}
           hasExistingClips={!!project.data?.clips.length}
           projectResources={project.data?.resources ?? []}
+          initialIdeaText={project.data?.script_text ?? ""}
           onClose={() => setPlanModalOpen(false)}
         />
       )}
