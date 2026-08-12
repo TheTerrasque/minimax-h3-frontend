@@ -31,6 +31,14 @@ you've flagged as continuing — that's a hard cut wearing a
 `continues_previous` label, and the render won't actually look
 continuous just because the flag is set.
 
+The render engine carries a short tail of each scene's own audio
+forward as the *next* scene's starting audio context, so anything you
+place right at the very end of a scene's dialogue/soundscape is most
+exposed to being cut off or garbled at the handover. Put important,
+plot-critical lines earlier or in the middle of a scene rather than as
+its last words, especially on a scene that will itself be continued by
+another.
+
 For each scene, set:
 
 - `"mode"`: `"t2v"` for a fresh shot that doesn't need to continue
