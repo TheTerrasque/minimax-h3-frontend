@@ -309,6 +309,18 @@ def _build_workflow_for_job(job: GenerationJob) -> dict[str, Any]:
         )
         ref_video_uploads = [_upload_reference(ref) for ref in videos]
 
+    continuation_params = job.continuation_params
+    if continuation_params:
+        # Uploaded here (not inside apply_motion_context()) to keep
+        # build_api_workflow() itself free of network I/O -- same reasoning
+        # as every _upload_reference() call above happening in this
+        # function rather than in build_api_workflow(). See
+        # motion_context.upload_silent_source_audio()'s docstring.
+        continuation_params = {
+            **continuation_params,
+            "silent_source_audio_upload": motion_context.upload_silent_source_audio(),
+        }
+
     return build_api_workflow(
         job.mode,
         width=job.width,
@@ -322,7 +334,7 @@ def _build_workflow_for_job(job: GenerationJob) -> dict[str, Any]:
         ref_audio_uploads=ref_audio_uploads,
         ref_video_uploads=ref_video_uploads,
         use_spectrum=job.use_spectrum,
-        continuation_params=job.continuation_params,
+        continuation_params=continuation_params,
     )
 
 

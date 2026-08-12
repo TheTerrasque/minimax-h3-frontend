@@ -44,7 +44,9 @@ download path never reads that file, only its own SaveVideo output).
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import wave
 from typing import Any
 
 from . import comfyui
@@ -71,26 +73,56 @@ GENERATION_FINGERPRINT = "director-v1"
 
 DEFAULT_CONTEXT_LENGTH = 22  # H3_CHAIN_FORMAT_GUIDE.md's tested default.
 
-# Deliberately NOT the extension's own "tested" 22 -- see chain_nodes.py's
-# MiniMaxH3ChainContext.apply(): every continuation clip always gets the
-# low-level motion-context node called with audio_mode="timeline" (hardcoded
-# there, not something a caller can override), whose own tooltip says the
-# pinned tail "gets coordinates on this clip's own timeline, end-aligned
-# with the pinned video, so the model reads it as this clip's sound so far
-# and continues it." Confirmed against a real render: a continuation clip
-# with a clean, well-structured, explicitly-quoted-dialogue prompt (correct
-# non_diegetic_music: N/A and all) still came out as continuous unintended
-# gibberish speech -- the pinned audio context's "keep talking" momentum
-# dominated over the text prompt, not a prompt-formatting problem. There's
-# no way to disable audio-context carryover outright while still getting
-# H3-generated audio per scene (the only mode that skips it, source_track,
-# requires an external audio track and stops H3 from generating audio at
-# all) -- audio_context_length is the one real lever: a much shorter pinned
-# tail should carry far less "still talking" momentum forward while leaving
-# video motion continuity (context_length above) untouched. Unverified
-# against a real render yet -- worth confirming this actually fixes it
-# before trusting it, and tuning further (even lower, or back up) if not.
+# HISTORY: this used to be audio_mode="generated_audio" with a much-shorter-
+# than-recommended audio_context_length, as a mitigation attempt -- see git
+# history for the full writeup. That didn't work: confirmed against a real
+# render even at audio_context_length=3, a continuation clip with a clean,
+# explicitly-quoted-dialogue prompt still came out as continuous gibberish
+# for the WHOLE clip, the specified dialogue nowhere in it. Root cause,
+# confirmed by reading chain_nodes.py's MiniMaxH3ChainContext.apply(): in
+# "generated_audio"/"source_plus_timeline" mode it ALWAYS calls the
+# low-level motion-context node with audio_mode="timeline" (hardcoded, not
+# overridable) whenever a previous scene's checkpoint latent is available --
+# which is every continuation scene -- and "timeline" mode's own tooltip
+# says the pinned tail "gets coordinates on this clip's own timeline,
+# end-aligned with the pinned video, so the model reads it as this clip's
+# sound so far and continues it." No audio_context_length is short enough to
+# escape that: the model isn't reading "a few extra frames of context", it's
+# reading "this speech is still going", a categorical bias, not a magnitude
+# one. audio_context_length is consequently unused now (kept only so a
+# revert is a one-line audio_mode change) -- see DEFAULT_AUDIO_CONTEXT_LENGTH
+# below and audio_mode's own default for the actual fix.
 DEFAULT_AUDIO_CONTEXT_LENGTH = 3
+
+# audio_mode="source_track" is the one plan-level setting where
+# MiniMaxH3ChainContext.apply() does NOT force previous_latent onto the
+# low-level node (use_latent_audio is only True for "generated_audio"/
+# "source_plus_timeline") -- so it calls the low-level node with
+# context_latent=None, context_audio=None, which (per nodes.py's own
+# MiniMaxH3MotionContext.apply()) skips its entire audio-conditioning block
+# outright ("audio off" in its own log line). context_frames (video motion
+# pinning) is passed unconditionally regardless of audio_mode, so this keeps
+# the confirmed-working motion continuity untouched while removing the
+# audio carryover bias entirely -- not tuning it, removing the mechanism.
+#
+# The catch: source_track requires a real "source_audio" AUDIO value wired
+# to MiniMaxH3ChainLoopStart/ChainCurrent (its own resume validation hashes
+# it, so every job in a run must supply byte-identical audio -- see
+# _silent_audio_wav_bytes()), and MiniMaxH3ChainCurrent slices a frame-exact
+# window of it per scene as its "source_audio_slice" output, described in
+# its own tooltip as "Frame-exact current source-audio window for Ref2VA."
+# We upload a short, genuinely silent placeholder (the extension's own docs
+# call this an anticipated case: "A short, completely silent placeholder is
+# padded") and -- this is the actual point -- never wire source_audio_slice
+# into anything. H3's sampler is therefore never given any audio reference
+# to imitate or match at all, so it generates fresh, purely
+# prompt-driven audio each scene, exactly like a non-continuation clip does.
+# Needs confirming against a real render (does a completely unconstrained
+# sampler actually still generate the requested spoken dialogue reliably,
+# same as scene 1 already does?) before trusting it fully.
+_SILENT_SOURCE_AUDIO_SECONDS = 1.0
+_SILENT_SOURCE_AUDIO_SAMPLE_RATE = 44100
+_SILENT_SOURCE_AUDIO_FILENAME = "director_silent_source_track.wav"
 
 DEFAULT_SEGMENT_CRF = 28  # Checkpoint segment quality -- these aren't the delivered output, so bias toward smaller files over SegmentSave's own default(18).
 
@@ -133,6 +165,45 @@ def _rewire(workflow: dict[str, Any], old_ref: list, new_ref: list) -> None:
                 node["inputs"][key] = list(new_ref)
 
 
+def _silent_audio_wav_bytes() -> bytes:
+    """A short, genuinely silent mono WAV -- see audio_mode="source_track"'s
+    docstring above for why this exists. Deterministic (same bytes every
+    call) since MiniMaxH3ChainCurrent hashes it against MiniMaxH3ChainLoopStart's
+    copy and against every other job in the same resumed chain run."""
+    buf = io.BytesIO()
+    frame_count = int(_SILENT_SOURCE_AUDIO_SECONDS * _SILENT_SOURCE_AUDIO_SAMPLE_RATE)
+    with wave.open(buf, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(_SILENT_SOURCE_AUDIO_SAMPLE_RATE)
+        wav_file.writeframes(b"\x00\x00" * frame_count)
+    return buf.getvalue()
+
+
+def upload_silent_source_audio() -> str:
+    """Uploads the silent audio_mode="source_track" placeholder (see that
+    mode's docstring above) and returns its ComfyUI-side filename. Exposed
+    as a separate call -- not done inside apply_motion_context() itself --
+    so callers can upload it as part of their own pre-render upload step,
+    the same way generation/tasks.py's _build_workflow_for_job() uploads
+    every reference before calling the (deliberately pure, no network I/O)
+    build_api_workflow()."""
+    return comfyui.upload_media(_silent_audio_wav_bytes(), _SILENT_SOURCE_AUDIO_FILENAME)
+
+
+def _add_load_audio_node(workflow: dict[str, Any], uploaded_name: str) -> str:
+    # Same shape as generation/tasks.py's own _add_load_audio_node -- not
+    # imported from there to avoid director-side code depending on
+    # generation.tasks (which is what imports *this* module).
+    node_id = _next_node_id(workflow)
+    workflow[node_id] = {
+        "class_type": "LoadAudio",
+        "inputs": {"audio": uploaded_name},
+        "_meta": {"title": "LoadAudio (silent source_track placeholder)"},
+    }
+    return node_id
+
+
 def base_seed_for_run(run_name: str) -> int:
     """Deterministic per-run base seed, derived from `run_name` so every
     separate job submission for the same continuation run resolves
@@ -162,8 +233,9 @@ def apply_motion_context(
     default_steps: int,
     context_length: int = DEFAULT_CONTEXT_LENGTH,
     audio_context_length: int = DEFAULT_AUDIO_CONTEXT_LENGTH,
-    audio_mode: str = "generated_audio",
+    audio_mode: str = "source_track",
     segment_crf: int = DEFAULT_SEGMENT_CRF,
+    silent_source_audio_upload: str | None = None,
 ) -> dict[str, Any]:
     """Mutates and returns `workflow` (an already-loaded/patched mode
     template, see generation/tasks.py::build_api_workflow) with this
@@ -180,6 +252,12 @@ def apply_motion_context(
     and validate the preceding scene's checkpoint," both handled entirely
     by MiniMaxH3ChainLoopStart itself, not anything this function does
     directly.
+
+    silent_source_audio_upload: required (raises otherwise) whenever
+    audio_mode is "source_track"/"source_plus_timeline" -- the ComfyUI-side
+    filename from upload_silent_source_audio(), called by the caller ahead
+    of this (see that function's docstring for why the upload itself isn't
+    done in here).
     """
     sampler_id = _find_one(workflow, _SAMPLER_PREP_CLASSES)
     random_noise_id = _find_one(workflow, ("RandomNoise",))
@@ -215,17 +293,37 @@ def apply_motion_context(
         "_meta": {"title": "MiniMaxH3ChainPlan"},
     }
 
+    # source_track requires *some* source_audio wired to both LoopStart and
+    # Current (hashed and validated against each other / across resumes --
+    # see audio_mode's docstring above). Its "source_audio_slice" output on
+    # Current is deliberately never wired to anything below.
+    silent_audio_id = None
+    if audio_mode in ("source_track", "source_plus_timeline"):
+        if not silent_source_audio_upload:
+            raise ValueError(
+                f"apply_motion_context: audio_mode={audio_mode!r} requires silent_source_audio_upload "
+                "(see upload_silent_source_audio())"
+            )
+        load_audio_id = _add_load_audio_node(workflow, silent_source_audio_upload)
+        silent_audio_id = [load_audio_id, 0]
+
     loop_start_id = _next_node_id(workflow)
+    loop_start_inputs = {"plan": [plan_id, 0], "start_clip": scene_number, "scene_range": str(scene_number)}
+    if silent_audio_id is not None:
+        loop_start_inputs["source_audio"] = silent_audio_id
     workflow[loop_start_id] = {
         "class_type": "MiniMaxH3ChainLoopStart",
-        "inputs": {"plan": [plan_id, 0], "start_clip": scene_number, "scene_range": str(scene_number)},
+        "inputs": loop_start_inputs,
         "_meta": {"title": "MiniMaxH3ChainLoopStart"},
     }
 
     current_id = _next_node_id(workflow)
+    current_inputs = {"state": [loop_start_id, 1]}
+    if silent_audio_id is not None:
+        current_inputs["source_audio"] = silent_audio_id
     workflow[current_id] = {
         "class_type": "MiniMaxH3ChainCurrent",
-        "inputs": {"state": [loop_start_id, 1]},
+        "inputs": current_inputs,
         "_meta": {"title": "MiniMaxH3ChainCurrent"},
     }
 
