@@ -33,6 +33,11 @@ urlpatterns = [
     path("director/clips/<int:clip_id>/", api.clip_detail, name="director_clip_detail"),
     path("director/clips/<int:clip_id>/references/", api.clip_references, name="director_clip_references"),
     path("director/references/<int:reference_id>/", api.clip_reference_detail, name="director_clip_reference_detail"),
+    path(
+        "director/references/<int:reference_id>/promote/",
+        api.promote_clip_reference,
+        name="director_promote_clip_reference",
+    ),
     path("director/clips/<int:clip_id>/reorder/", api.reorder_clip, name="director_reorder_clip"),
     path("director/clips/<int:clip_id>/split/", api.split_clip, name="director_split_clip"),
     path("director/clips/<int:clip_id>/render/", api.render_clip, name="director_render_clip"),

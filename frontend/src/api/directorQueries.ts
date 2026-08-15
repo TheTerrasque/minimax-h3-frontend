@@ -299,6 +299,22 @@ export function useDeleteClipReference() {
   });
 }
 
+// Moves a clip's own reference up to a project-wide shared resource --
+// see backend director/services.py's promote_clip_reference(). Lets a
+// reference added to one clip (e.g. a character that turns out to recur)
+// become addressable from every clip in the project without re-uploading
+// it as a fresh shared resource.
+export function usePromoteClipReference() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ referenceId }: { projectId: number; referenceId: number }) =>
+      apiFetch<ProjectResource>(`/director/references/${referenceId}/promote/`, { method: "POST" }),
+    onSuccess: (_data, { projectId }) => {
+      void queryClient.invalidateQueries({ queryKey: ["director-project", projectId] });
+    },
+  });
+}
+
 export function useReorderClip() {
   const queryClient = useQueryClient();
   return useMutation({

@@ -218,7 +218,9 @@ def _combined_references(clip: Clip) -> list[ProjectResource | ReferenceAsset]:
     return combined
 
 
-def renumber_clip_reference_tokens(project: Project, kind: str, old_project_count: int, new_project_count: int) -> None:
+def renumber_clip_reference_tokens(
+    project: Project, kind: str, old_project_count: int, new_project_count: int, *, exclude_clip: Clip | None = None
+) -> None:
     """Rewrites every "<Picture N>"/"<Video N>"/"<Audio N>" token of `kind`
     in every Clip's prompt/improved_prompt so it keeps pointing at the same
     underlying reference after a ProjectResource of this kind is added or
@@ -242,6 +244,12 @@ def renumber_clip_reference_tokens(project: Project, kind: str, old_project_coun
     is kept correct. Doesn't mark anything dirty itself -- the caller
     already does via mark_project_dirty() for the resource add/remove
     itself.
+
+    exclude_clip: skip that one Clip entirely -- for
+    promote_clip_reference(), whose source Clip is simultaneously losing a
+    slot from its own numbering, which this uniform-delta shift doesn't
+    model (see that function's own docstring for why its prompt is left
+    unrewritten instead of guessing).
     """
     delta = new_project_count - old_project_count
     if delta == 0:
@@ -254,6 +262,8 @@ def renumber_clip_reference_tokens(project: Project, kind: str, old_project_coun
         return f"<{word} {n}>" if n <= boundary else f"<{word} {n + delta}>"
 
     for clip in project.clips.all():
+        if exclude_clip is not None and clip.id == exclude_clip.id:
+            continue
         update_fields = []
         for field in ("prompt", "improved_prompt"):
             text = getattr(clip, field)
@@ -796,6 +806,53 @@ def convert_clips_to_reference(project: Project) -> int:
         if converted:
             mark_project_dirty(project)
     return converted
+
+
+def promote_clip_reference(ref: ClipReferenceAsset) -> ProjectResource:
+    """Moves a Clip's own reference (ClipReferenceAsset) up to a
+    Project-wide shared resource (ProjectResource) -- e.g. a reference the
+    user added to one clip and only afterward realized should be shared
+    (a recurring character, a consistent voice) rather than local to that
+    one render. The caller (director/api.py's promote_clip_reference())
+    has already checked every clip in the project is r2v and that no
+    other clip's own reference count would go over its per-kind limit
+    once this one joins the shared pool -- same preconditions
+    project_resources() POST enforces for a brand-new upload.
+
+    Renumbers every OTHER clip's own reference tokens the same way a
+    plain project_resources() POST does (renumber_clip_reference_tokens)
+    -- the shared pool for this kind just grew by one, same as if this
+    file had been uploaded fresh there. The clip actually losing a
+    reference needs different arithmetic (it's simultaneously losing a
+    slot from its own numbering while the shared pool gains one, so its
+    surviving own-references' tokens shift by a different amount than
+    every other clip's, and the promoted token itself isn't a simple
+    shift at all -- same underlying file, unrelated new number) -- left
+    unrewritten rather than guessed, same "may need a manual prompt
+    touch-up" caveat as convert_clips_to_reference() already carries.
+    """
+    clip = ref.clip
+    project = clip.project
+    kind = ref.kind
+    old_project_count = project.resources.filter(kind=kind).count()
+
+    ref.file.open("rb")
+    try:
+        content = ref.file.read()
+    finally:
+        ref.file.close()
+
+    with transaction.atomic():
+        resource = ProjectResource(project=project, kind=kind, order=old_project_count)
+        resource.file.save(ref.file.name.rsplit("/", 1)[-1], ContentFile(content), save=True)
+
+        ref.file.delete(save=False)
+        ref.delete()
+
+        renumber_clip_reference_tokens(project, kind, old_project_count, old_project_count + 1, exclude_clip=clip)
+        mark_project_dirty(project)
+
+    return resource
 
 
 def normalize_planned_scenes(raw_scenes, *, require_reference_mode: bool = False) -> list[dict]:

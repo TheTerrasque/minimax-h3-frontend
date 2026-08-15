@@ -4,6 +4,7 @@ import {
   useCancelClip,
   useDeleteClip,
   useDeleteClipReference,
+  usePromoteClipReference,
   useRenderClip,
   useSplitClip,
   useUpdateClip,
@@ -52,6 +53,13 @@ interface ClipEditorPanelProps {
   // _combined_references()), so they're included alongside this clip's
   // own reference labels below, not on their own.
   projectResourceLabels: string[];
+  // True once every clip in the project is a reference clip (see
+  // ProjectBoard's own canAddResources) -- the same precondition the
+  // backend enforces before a clip's own reference can be promoted to a
+  // project-wide shared one (see director/api.py's
+  // promote_clip_reference()), checked here so the button isn't shown
+  // only to 400 on click.
+  allClipsReference: boolean;
   onClose: () => void;
 }
 
@@ -62,6 +70,7 @@ export function ClipEditorPanel({
   overarchingPrompt,
   previousClipsContext,
   projectResourceLabels,
+  allClipsReference,
   onClose,
 }: ClipEditorPanelProps) {
   const config = useConfig();
@@ -73,6 +82,7 @@ export function ClipEditorPanel({
   const cancelClip = useCancelClip();
   const addReference = useAddClipReference();
   const deleteReference = useDeleteClipReference();
+  const promoteReference = usePromoteClipReference();
   const refinePrompt = useRefinePrompt();
   const chatReply = useChatReply();
 
@@ -383,6 +393,16 @@ export function ClipEditorPanel({
                       {refs.map((ref) => (
                         <li key={ref.id} className="reference-item">
                           <span>{ref.label}</span>
+                          {allClipsReference && (
+                            <button
+                              type="button"
+                              title="Make this reference available to every clip in the project"
+                              disabled={promoteReference.isPending}
+                              onClick={() => promoteReference.mutate({ projectId, referenceId: ref.id })}
+                            >
+                              Make global
+                            </button>
+                          )}
                           <button type="button" onClick={() => deleteReference.mutate({ projectId, referenceId: ref.id })}>
                             Remove
                           </button>
@@ -390,6 +410,7 @@ export function ClipEditorPanel({
                       ))}
                     </ul>
                   )}
+                  {promoteReference.isError && <p className="error">Couldn't make that reference global. Try again.</p>}
                   {refs.length < max && (
                     <DropZone
                       accept={accept}

@@ -807,6 +807,63 @@ def clip_reference_detail(request, reference_id: int):
 
 
 @extend_schema(
+    summary="Promote a clip's own reference to a project-wide shared resource",
+    description="Moves this reference from being visible only to its own clip's render to being "
+    "addressable by every clip in the project (see director/models.py's ProjectResource vs "
+    "ClipReferenceAsset) -- for a reference added to one clip that turns out to recur elsewhere. "
+    "Same preconditions as POST project_resources/: every clip in the project must already be a "
+    "reference clip, and moving it mustn't push any other clip's own reference count of this kind "
+    "over its per-kind limit. The originating clip's own prompt/improved_prompt text isn't "
+    "rewritten (see services.promote_clip_reference()'s docstring) -- its <Picture N>/etc mentions "
+    "of this reference may need a manual touch-up afterward.",
+    responses={201: ProjectResourceSerializer, 400: ErrorResponseSerializer, 404: OpenApiResponse(description="Not found.")},
+    tags=["director"],
+)
+@api_view(["POST"])
+def promote_clip_reference(request, reference_id: int):
+    ref = get_object_or_404(ClipReferenceAsset, id=reference_id, clip__project__user=request.user)
+    clip = ref.clip
+    project = clip.project
+
+    if project.clips.exclude(mode=Mode.REFERENCE_TO_VIDEO).exists():
+        return Response(
+            {
+                "error": "This project has non-reference clips -- every clip must be a reference "
+                "clip before a reference can be made shared. Convert them first."
+            },
+            status=400,
+        )
+
+    limits = {
+        ReferenceAsset.Kind.IMAGE: _MAX_REFERENCE_IMAGES,
+        ReferenceAsset.Kind.AUDIO: _MAX_REFERENCE_AUDIO,
+        ReferenceAsset.Kind.VIDEO: _MAX_REFERENCE_VIDEO,
+    }[ref.kind]
+    max_for_kind = limits[Mode.REFERENCE_TO_VIDEO]
+    new_project_count = project.resources.filter(kind=ref.kind).count() + 1
+    # Every *other* clip's own reference count of this kind is untouched by
+    # the move -- only the source clip loses one, which frees up exactly
+    # the slot the shared pool just gained for it (see
+    # services.promote_clip_reference()'s docstring), so it can't be the
+    # one that overflows here.
+    worst_other_clip_count = max(
+        (c.references.filter(kind=ref.kind).count() for c in project.clips.exclude(id=clip.id)), default=0
+    )
+    if new_project_count + worst_other_clip_count > max_for_kind:
+        return Response(
+            {
+                "error": f"Reference clips support at most {max_for_kind} {ref.kind} reference(s) "
+                f"total (shared + a clip's own) -- moving this one would put at least one other "
+                f"clip over that limit."
+            },
+            status=400,
+        )
+
+    resource = services.promote_clip_reference(ref)
+    return Response(_serialize_resource(resource), status=201)
+
+
+@extend_schema(
     summary="Split a clip into two, chained via continues_previous",
     description="Inserts a new clip immediately after this one, continuing directly from it -- "
     "for a scene whose prompt tries to cover too much at once. The new clip starts as a copy of "

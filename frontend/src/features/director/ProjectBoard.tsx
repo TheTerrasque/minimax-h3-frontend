@@ -413,6 +413,7 @@ export function ProjectBoard() {
           overarchingPrompt={project.data?.overarching_prompt ?? ""}
           previousClipsContext={previousClipsContext}
           projectResourceLabels={resourceLabels}
+          allClipsReference={canAddResources}
           onClose={() => setSelectedClipId(null)}
         />
       )}
