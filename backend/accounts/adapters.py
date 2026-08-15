@@ -24,6 +24,7 @@ from django.db import transaction
 
 from allauth.account.adapter import DefaultAccountAdapter
 from allauth.socialaccount.adapter import DefaultSocialAccountAdapter
+from allauth.socialaccount.models import SocialLogin
 
 from .models import Invite
 
@@ -35,6 +36,40 @@ def _session_invite(request) -> Invite | None:
     if not token:
         return None
     return Invite.objects.filter(token=token).first()
+
+
+def _pending_oidc_signup(request) -> bool:
+    """True while this account_signup form render/submit is actually
+    allauth's *social* signup fallback for an OIDC login, not a real local
+    email/password signup.
+
+    allauth's "auto signup" (InviteGatedSocialAccountAdapter.save_user,
+    called directly with no form) only fires when it can silently prove the
+    social account's email is safe to use -- e.g. it backs off to this form
+    instead whenever that email happens to collide with an existing
+    (possibly unverified) account, since a hacker could put your address on
+    an account they don't own. When that happens, allauth stashes the
+    pending SocialLogin in session (see
+    socialaccount.internal.flows.signup.redirect_to_signup) and renders
+    this same allauth.account.forms.BaseSignupForm -- whose clean_email
+    unconditionally calls *this* (account, not social) adapter, with no clue
+    it's mid-OIDC-login. Confirmed hitting exactly this: an OIDC first-login
+    landed here and got a bogus "invite doesn't cover that email" error,
+    even though OIDC is meant to need no invite at all (see module
+    docstring). Mirrors InviteGatedSocialAccountAdapter.is_open_for_signup's
+    OIDC bypass below, so both entry points agree on when an invite is
+    required.
+    """
+    if not settings.OIDC_AUTO_SIGNUP:
+        return False
+    data = request.session.get("socialaccount_sociallogin")
+    if not data:
+        return False
+    try:
+        sociallogin = SocialLogin.deserialize(data)
+    except ValueError:
+        return False
+    return sociallogin.account.provider == settings.OIDC_PROVIDER_ID
 
 
 def _claim_invite(request) -> Invite | None:
@@ -66,11 +101,15 @@ class NoSelfSignupAccountAdapter(DefaultAccountAdapter):
         # we do know it (clean_email). This is a cheap up-front check only --
         # see _claim_invite() for the race-safe check actually enforced at
         # account-creation time.
+        if _pending_oidc_signup(request):
+            return True
         invite = _session_invite(request)
         return invite is not None and not invite.is_redeemed and not invite.is_expired
 
     def clean_email(self, email: str) -> str:
         email = super().clean_email(email)
+        if _pending_oidc_signup(self.request):
+            return email
         invite = _session_invite(self.request)
         if invite is None or not invite.is_valid_for_email(email):
             raise forms.ValidationError(

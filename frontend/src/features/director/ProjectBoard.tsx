@@ -205,6 +205,10 @@ export function ProjectBoard() {
   const hasResources = !!project.data?.resources.length;
   const visibleClipModes = hasResources ? NEW_CLIP_MODES.filter((m) => m.mode === "r2v") : NEW_CLIP_MODES;
   const resourceLabels = project.data?.resources.map((r) => r.token_label) ?? [];
+  // Mirrors ProjectResourcesPanel's own hasNonReferenceClips check -- shown
+  // in ScriptPlanModal's no-references nudge so it doesn't point the user
+  // at an "add a reference" action that's actually blocked right now.
+  const canAddResources = !project.data?.clips.some((c) => c.mode !== "r2v");
   const previousClipsContext = selectedClip && project.data ? buildPreviousClipsContext(project.data.clips, selectedClip.order) : "";
 
   return (
@@ -418,6 +422,8 @@ export function ProjectBoard() {
           projectId={projectId}
           hasExistingClips={!!project.data?.clips.length}
           projectResources={project.data?.resources ?? []}
+          canAddResources={canAddResources}
+          projectAspectRatio={project.data?.aspect_ratio ?? "16:9"}
           initialIdeaText={project.data?.script_text ?? ""}
           onClose={() => setPlanModalOpen(false)}
         />

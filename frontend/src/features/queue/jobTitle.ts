@@ -9,7 +9,7 @@ const DEFAULT_MAX_LENGTH = 100;
 
 // Shared by QueueSidebar (list rows, pass a shorter maxLength) and JobModal
 // (heading + the edit-draft starting value) -- job.title is user-set (see
-// useUpdateJobTitle), blank by default, in which case this falls back to
+// useUpdateJob), blank by default, in which case this falls back to
 // the prompt itself.
 export function displayTitle(job: GenerationJob, maxLength: number = DEFAULT_MAX_LENGTH): string {
   const title = job.title.trim();

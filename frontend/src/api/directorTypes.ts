@@ -101,3 +101,24 @@ export interface PlannedScene {
   prompt: string;
   notes: string;
 }
+
+// One suggested reference asset from POST .../extract_references/ -- a
+// preview, not yet generated or attached. `description` is a ready-to-use
+// t2i (kind "image") or t2a (kind "audio") generation prompt for that one
+// subject, see ScriptPlanModal's per-candidate "Generate" step.
+export interface ReferenceCandidate {
+  name: string;
+  kind: Extract<ReferenceKind, "image" | "audio">;
+  description: string;
+}
+
+// One row from GET .../job_memberships/ -- which Director project (if
+// any) a given standalone GenerationJob's id already belongs to as some
+// Clip's current_job. Lets the main Generate page's job modal show "part
+// of <project>" instead of offering to create a new project from a job
+// that's already on a board.
+export interface JobMembership {
+  job_id: number;
+  project_id: number;
+  project_title: string;
+}

@@ -297,6 +297,11 @@ class GenerationJobSerializer(serializers.Serializer):
         help_text="User-editable label (see PATCH below) -- blank means the frontend should "
         "fall back to raw_prompt, see frontend/src/features/queue/jobTitle.ts.",
     )
+    is_favorite = serializers.BooleanField(help_text="User-toggled 'hearted' flag -- see PATCH below.")
+    is_archived = serializers.BooleanField(
+        help_text="Hides this job from the default queue/history view -- see PATCH below. The "
+        "list endpoint always returns every job regardless; filtering is client-side."
+    )
     preset_id = serializers.IntegerField()
     preset_label = serializers.CharField(
         help_text='The quality tier this job rendered at, e.g. "Draft", "Standard" -- '
@@ -350,11 +355,13 @@ class GenerationJobDetailSerializer(GenerationJobSerializer):
     references = ReferenceAssetSerializer(many=True)
 
 
-class UpdateJobTitleRequestSerializer(serializers.Serializer):
+class UpdateJobRequestSerializer(serializers.Serializer):
     title = serializers.CharField(
-        allow_blank=True, max_length=200,
+        allow_blank=True, max_length=200, required=False,
         help_text="Blank clears it (the frontend then falls back to showing raw_prompt).",
     )
+    is_favorite = serializers.BooleanField(required=False)
+    is_archived = serializers.BooleanField(required=False)
 
 
 @extend_schema(
@@ -656,6 +663,8 @@ def _serialize_job(
         "status": job.status,
         "raw_prompt": job.raw_prompt,
         "title": job.title,
+        "is_favorite": job.is_favorite,
+        "is_archived": job.is_archived,
         "preset_id": job.preset_id,
         "preset_label": job.preset.label,
         "duration_id": job.duration_id,
@@ -934,10 +943,11 @@ def jobs(request):
 )
 @extend_schema(
     methods=["PATCH"],
-    summary="Rename a generation job",
-    description="Only touches title -- every other field is set at creation time and never "
-    "editable. Only the owning user can rename their own job (404 otherwise).",
-    request=UpdateJobTitleRequestSerializer,
+    summary="Rename, favorite, or archive a generation job",
+    description="Only touches title/is_favorite/is_archived -- every other field is set at "
+    "creation time and never editable. Any subset of the three may be sent; at least one is "
+    "required. Only the owning user can edit their own job (404 otherwise).",
+    request=UpdateJobRequestSerializer,
     responses={200: GenerationJobDetailSerializer, 400: ErrorResponseSerializer, 404: OpenApiResponse(description="Not found.")},
     tags=["generation"],
 )
@@ -962,13 +972,24 @@ def job_detail(request, job_id: int):
         return Response(status=204)
 
     if request.method == "PATCH":
-        title = request.data.get("title")
-        if not isinstance(title, str):
-            return Response({"error": "title is required and must be a string."}, status=400)
-        if len(title) > 200:
-            return Response({"error": "title must be at most 200 characters."}, status=400)
-        job.title = title.strip()
-        job.save(update_fields=["title"])
+        update_fields = []
+        if "title" in request.data:
+            title = request.data.get("title")
+            if not isinstance(title, str):
+                return Response({"error": "title must be a string."}, status=400)
+            if len(title) > 200:
+                return Response({"error": "title must be at most 200 characters."}, status=400)
+            job.title = title.strip()
+            update_fields.append("title")
+        if "is_favorite" in request.data:
+            job.is_favorite = str(request.data.get("is_favorite")).lower() in ("1", "true", "yes", "on")
+            update_fields.append("is_favorite")
+        if "is_archived" in request.data:
+            job.is_archived = str(request.data.get("is_archived")).lower() in ("1", "true", "yes", "on")
+            update_fields.append("is_archived")
+        if not update_fields:
+            return Response({"error": "title, is_favorite, or is_archived is required."}, status=400)
+        job.save(update_fields=update_fields)
         return Response(_serialize_job(job, detail=True))
 
     finish_time = expected_finish_times().get(job.id)

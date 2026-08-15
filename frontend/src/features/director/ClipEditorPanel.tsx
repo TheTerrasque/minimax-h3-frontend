@@ -5,6 +5,7 @@ import {
   useDeleteClip,
   useDeleteClipReference,
   useRenderClip,
+  useSplitClip,
   useUpdateClip,
 } from "../../api/directorQueries";
 import type { Clip } from "../../api/directorTypes";
@@ -68,6 +69,7 @@ export function ClipEditorPanel({
   const updateClip = useUpdateClip();
   const deleteClip = useDeleteClip();
   const renderClip = useRenderClip();
+  const splitClip = useSplitClip();
   const cancelClip = useCancelClip();
   const addReference = useAddClipReference();
   const deleteReference = useDeleteClipReference();
@@ -161,6 +163,11 @@ export function ClipEditorPanel({
 
   async function handleDelete() {
     await deleteClip.mutateAsync({ projectId, clipId: clip.id });
+    onClose();
+  }
+
+  async function handleSplit() {
+    await splitClip.mutateAsync({ projectId, clipId: clip.id });
     onClose();
   }
 
@@ -440,6 +447,14 @@ export function ClipEditorPanel({
               {renderClip.isPending ? "Starting…" : "Re-render"}
             </button>
           )}
+          <button
+            type="button"
+            onClick={() => void handleSplit()}
+            disabled={isBusy || splitClip.isPending}
+            title="Insert a new clip right after this one, continuing directly from it -- for a scene that's trying to cover too much at once. Starts as a copy of this clip's prompt; pare each half down to its own beat."
+          >
+            {splitClip.isPending ? "Splitting…" : "Split"}
+          </button>
           {confirmingDelete ? (
             <>
               <span className="hint">Delete this clip? This can't be undone.</span>
@@ -463,6 +478,7 @@ export function ClipEditorPanel({
           )}
         </div>
         {renderClip.isError && <p className="error">Couldn't start that render. Try again.</p>}
+        {splitClip.isError && <p className="error">Couldn't split that clip. Try again.</p>}
         {deleteClip.isError && <p className="error">Couldn't delete that clip. Try again.</p>}
 
         {chatOpen && (

@@ -687,6 +687,12 @@ select {
   min-width: 0;
   border-left: 1px solid var(--border);
   padding-left: 24px;
+  /* Reserves room for this element's own vertical scrollbar (overflow-y:
+     auto below) -- without it, a non-overlay scrollbar (the Windows/Linux
+     default) eats into the content box with no margin of its own, clipping
+     anything flush against the right edge, e.g. .queue-filters-header's
+     "Reset" link. */
+  padding-right: 16px;
   position: sticky;
   /* Sticks just below the (also-sticky) nav, not 24px from the raw viewport
      top -- that used to be less than the nav's own height, so the sidebar
@@ -728,6 +734,123 @@ select {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.queue-entry {
+  /* Anchors .queue-entry-quick-actions -- a sibling of queue-entry-button
+     (not nested inside it, since a <button> can't legally contain
+     another), positioned over its thumbnail corner. */
+  position: relative;
+}
+
+.queue-entry-quick-actions {
+  position: absolute;
+  top: 5px;
+  left: 5px;
+  z-index: 1;
+  display: flex;
+  gap: 3px;
+}
+
+.queue-entry-quick-action {
+  width: 19px;
+  height: 19px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 50%;
+  background: rgba(20, 20, 24, 0.6);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+
+.queue-entry-quick-action:hover {
+  background: rgba(20, 20, 24, 0.85);
+  transform: scale(1.12);
+}
+
+.queue-entry-quick-action-favorite[aria-pressed="true"] {
+  background: #e0355f;
+  border-color: #e0355f;
+}
+
+.queue-entry-quick-action-archive[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.queue-filters-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+
+.queue-filters-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font: inherit;
+  font-weight: 600;
+  color: var(--text-h);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.queue-filters-toggle:hover {
+  color: var(--accent);
+}
+
+.queue-filters-badge {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  display: inline-block;
+}
+
+.queue-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 0 0 12px;
+}
+
+.queue-filter-control {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.queue-filter-control select {
+  font: inherit;
+  max-width: 140px;
+}
+
+.queue-filter-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.queue-filter-checkbox input {
+  cursor: pointer;
+}
+
+.queue-filter-count {
+  margin: 0 0 8px;
 }
 
 .queue-entry-button {
@@ -974,6 +1097,11 @@ select {
 
 .modal-mode-label {
   margin: 2px 0 0;
+}
+
+.job-favorite-toggle {
+  margin-left: 8px;
+  font-size: 15px;
 }
 
 .modal-video {
@@ -1902,6 +2030,38 @@ select {
   margin: 4px 0 0;
   padding-left: 20px;
   font-size: 13px;
+}
+
+.plan-reference-suggest {
+  margin-top: 10px;
+}
+
+.plan-resource-candidate-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.plan-resource-candidate {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.plan-resource-candidate-body p {
+  margin: 2px 0 0;
+}
+
+.plan-resource-candidate-action {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 /* Mobile responsiveness */

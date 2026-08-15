@@ -460,6 +460,81 @@ def plan_scenes(
         raise LLMError(f"The AI's reply wasn't valid JSON: {exc}") from exc
 
 
+def extract_reference_subjects(idea_text: str, extra_context: str | None = None) -> list:
+    """One-shot script/idea -> a proposed list of character/object/voice
+    reference assets worth generating up front, backing "Generate from
+    script"'s reference-suggestion step. Returns whatever JSON value the
+    LLM replied with (expected: a list of {"name", "kind", "description"}
+    dicts) -- deliberately untyped/unvalidated here, same posture as
+    plan_scenes(): director/api.py's extract_references() view does the
+    minimal shape-checking needed before handing this to the frontend, and
+    nothing here is ever written to a Clip/ProjectResource directly.
+
+    The point of this step: plan_scenes() (and a human writing prompts by
+    hand) can only keep a character's look/voice consistent across hard
+    cuts by re-describing them in words every time (see
+    DIRECTOR_PLAN_GUIDE_en.md section 2.5) -- real reference assets (a
+    character-sheet image, a voice sample) pin it far more reliably, since
+    a render that actually draws on one inherits the look/voice from the
+    reference itself rather than the render model's own reinterpretation
+    of a text description. This surfaces which recurring subjects would
+    actually benefit from one, and a ready-to-use generation prompt for
+    each, so the frontend can offer a one-click "generate this reference"
+    per entry before the user proceeds to plan_scenes().
+
+    Each returned "description" is meant to be submitted verbatim as a
+    t2i (kind="image") or t2a (kind="audio") job's raw_prompt -- it
+    already follows the respective house guide's own structure, so the
+    frontend doesn't need to run it through improve_prompt() first.
+    """
+    image_guide = _load_guide("t2i")
+    audio_guide = _load_guide("t2a")
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You read a script or loose idea for a multi-clip video project and identify which "
+                "recurring named characters, objects, or settings would genuinely benefit from a "
+                "fixed reference asset -- something a downstream image/audio generator can create "
+                "once, so every clip that uses it can draw on the same reference instead of the "
+                "render model reinventing that subject's appearance or voice from a text "
+                "description each time. Only propose a subject that actually recurs across more "
+                "than one scene and would be visibly worse for looking/sounding inconsistent -- "
+                "never propose a one-off background detail that appears in a single scene, and "
+                "don't invent named characters/objects the text doesn't actually establish. A "
+                "recurring character who's both seen and heard speaking can get two separate "
+                "entries (one image, one audio) if both are worth pinning down.\n\n"
+                "For each proposed subject, respond with:\n"
+                '- "name": a short human label (e.g. "Mara", "the lighthouse", "Mara\'s voice").\n'
+                '- "kind": "image" for a visual character/object/setting reference, or "audio" for '
+                "a speaking character's voice.\n"
+                '- "description": a ready-to-use generation prompt for that single reference '
+                "asset, written to submit as-is. For \"image\", follow the image guide below's own "
+                "structure (one dense paragraph describing a single frame: style, subject, "
+                "composition, environment, lighting). For \"audio\", follow the audio guide below's "
+                "own structure (a plain description of the voice) and, since this is a voice "
+                "reference specifically, always have the character speak one short representative "
+                "line using `<d>[English] ...</d>` (invent a natural line if the source text "
+                "doesn't give one) with the voice's pitch/timbre/pacing/accent described just "
+                "before the tag, so the sample actually captures speech.\n\n"
+                "Respond with only a single JSON array, no prose before or after it (a fenced "
+                "```json code block wrapping the array is fine; nothing else is) -- an empty array "
+                "if nothing in the text genuinely warrants a reference.\n\n"
+                "---\n\nImage house guide referenced above:\n\n"
+                f"{image_guide}\n\n---\n\nAudio house guide referenced above:\n\n{audio_guide}"
+                f"{_extra_context_note(extra_context)}"
+                f"{_custom_system_note(settings.LLM_CUSTOM_SYSTEM_PROMPT_REFINE)}"
+            ),
+        },
+        {"role": "user", "content": idea_text},
+    ]
+    reply = _strip_wrapping_fence(_post_chat_completion(messages, timeout=180))
+    try:
+        return json.loads(reply)
+    except json.JSONDecodeError as exc:
+        raise LLMError(f"The AI's reply wasn't valid JSON: {exc}") from exc
+
+
 def check_project_continuity(overarching_prompt: str, clips: list[dict]) -> str:
     """One-shot review of a Director project's full clip sequence, backing
     "Check continuity" -- a plain-text report of likely problems for a

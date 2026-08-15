@@ -74,6 +74,61 @@ For each scene, set:
   that suits the whole run reasonably well, since later scenes in that
   same run will inherit it regardless of what you put here.
 
+## 2.5 Keeping characters and their state consistent across hard cuts
+
+A hard-cut scene (`"continues_previous": false`) is rendered from text
+alone with **zero memory of any other scene** — the render model has no
+idea what an earlier scene looked like unless the prompt restates it.
+If a character's appearance or physical state isn't spelled out again
+in every scene, the render model will freely reinvent it, which is what
+produces visibly broken sequences like a character's hair or outfit
+changing between scenes, or sitting in one scene, standing in the next,
+then sitting again in a third with no in-story reason for either change.
+Prevent this actively rather than leaving it to chance:
+
+- Before writing any scene prompts, fix each named character's stable
+  appearance — hairstyle/length/color, exact outfit, and any
+  distinguishing features — and restate that *same* description in the
+  `integrated_multimodal_description` of every single scene that
+  character appears in, hard cut or not. Only change it when the story
+  itself changes it (a costume change, getting soaked, cutting their
+  hair), and when it does, say so explicitly and carry the new
+  description forward from that point on in every later scene.
+- Track each character's physical state — sitting, standing, lying
+  down, where in the space, what they're holding — across scenes the
+  same way. If one scene ends with a character seated, and the next
+  scene doesn't involve a deliberate action that would change that,
+  open the next scene with them still seated in the same place, rather
+  than silently defaulting to a neutral standing pose because the
+  previous scene's ending state wasn't restated. Only move a character
+  to a new resting position once a scene actually earns it by
+  describing the transition (they stood up, crossed the room, sat back
+  down) — never skip straight from one static state to a different one
+  with no action connecting them.
+- The same problem hits voices, not just looks: a speaker ID like `(S1)`
+  only guarantees the *label* stays consistent within your own output,
+  not the actual timbre the render model generates for it — with no
+  audio memory across a hard cut, `(S1)` in scene 1 and `(S1)` in scene 4
+  can come out sounding like different people. Fight this the same way:
+  every time a character who's spoken before speaks again, restate the
+  same concrete vocal identity you gave them the first time (age, gender,
+  pitch, timbre, speaking rate, accent) rather than just repeating the
+  bare ID, so each scene's render is independently pointed at the same
+  voice description instead of drifting on its own.
+- This applies to every scene, chained or not — a hard cut still has to
+  read as a cut *within* the same continuous world and the same people,
+  just from a new angle or moment, not as a different set change. (When
+  reference tokens are available, see section 3.5: a scene that
+  actually draws on a character's reference image or voice sample gets
+  looks/voice for free from the reference itself — this is the most
+  reliable fix and is worth recommending when the project has none yet
+  — but a scene that doesn't draw on one still needs the same explicit
+  restatement.)
+- Favor concrete, specific detail over vague shorthand throughout —
+  "the same young woman from before" gives the render model nothing to
+  work with, whereas restating "the young woman with shoulder-length
+  black hair, wearing a faded green field jacket" does.
+
 ## 3. Writing each scene's prompt (no shared references)
 
 This section applies when no reference tokens are listed as available to

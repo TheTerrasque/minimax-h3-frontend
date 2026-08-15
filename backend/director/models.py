@@ -294,3 +294,39 @@ class ClipReferenceAsset(models.Model):
         )
         position = same_kind_ids.index(self.id) + 1 if self.id in same_kind_ids else 1
         return f"{kind_labels[self.kind]} {project_offset + position}"
+
+
+class JobProjectTag(models.Model):
+    """Permanent record of which Director project a GenerationJob was
+    rendered under -- created once, alongside the job itself, by
+    services._build_job_for_clip() (a fresh/re-render) or
+    services.create_project_from_job() (wrapping a standalone job), and
+    never reassigned or deleted afterward.
+
+    This is deliberately separate from Clip.current_job: that FK is a
+    single "whichever job this clip's board currently shows" pointer --
+    every re-render creates a brand-new GenerationJob and moves it to
+    point at that one, silently abandoning the previous job with no
+    record of where it came from (confirmed against real data: most
+    Director-created jobs end up in exactly this orphaned state the
+    moment their clip is re-rendered even once). This table exists so a
+    superseded job still shows "part of <project>" in the main Generate
+    page (see director/api.py's job_memberships()) instead of looking
+    like a random standalone job the moment something newer replaces it.
+
+    One important limitation: a job created before this model existed has
+    no way to backfill this retroactively if it was already orphaned by
+    then -- Clip.current_job doesn't remember what it used to point at,
+    so there's no surviving trace of which project an already-superseded
+    job came from. The migration that introduced this table backfills
+    only from Clip.current_job's state *at that moment* (only what was
+    still traceable then); anything already orphaned before that stays
+    untagged permanently.
+    """
+
+    job = models.OneToOneField(GenerationJob, on_delete=models.CASCADE, related_name="director_project_tag")
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="job_tags")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self) -> str:
+        return f"JobProjectTag(job={self.job_id}, project={self.project_id})"

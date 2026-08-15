@@ -1,5 +1,5 @@
 import type { ProjectDetail } from "../../api/directorTypes";
-import { useCreateProjectResource, useDeleteProjectResource } from "../../api/directorQueries";
+import { useConvertToReference, useCreateProjectResource, useDeleteProjectResource } from "../../api/directorQueries";
 import type { ReferenceKind } from "../../api/types";
 import { DropZone } from "../shared/DropZone";
 
@@ -24,6 +24,7 @@ interface ProjectResourcesPanelProps {
 export function ProjectResourcesPanel({ project }: ProjectResourcesPanelProps) {
   const createResource = useCreateProjectResource();
   const deleteResource = useDeleteProjectResource();
+  const convertToReference = useConvertToReference();
 
   // Only a reference clip's render can actually wire a shared resource in
   // (see backend director/services.py's _combined_references()) -- adding
@@ -58,10 +59,23 @@ export function ProjectResourcesPanel({ project }: ProjectResourcesPanelProps) {
         </ul>
       )}
       {hasNonReferenceClips ? (
-        <p className="hint">
-          This project has non-reference clips — delete or convert them before adding a shared
-          reference.
-        </p>
+        <div>
+          <p className="hint">
+            This project has non-reference clips — delete them, or convert every clip to
+            reference mode, before adding a shared reference. Converting keeps every clip and its
+            own references intact; it only changes how a clip's own image reference (if any) is
+            addressed -- as a <code>&lt;Picture N&gt;</code> token in its prompt, rather than an
+            implicit first frame.
+          </p>
+          <button
+            type="button"
+            onClick={() => convertToReference.mutate(project.id)}
+            disabled={convertToReference.isPending}
+          >
+            {convertToReference.isPending ? "Converting…" : "Convert all clips to reference mode"}
+          </button>
+          {convertToReference.isError && <p className="error">Couldn't convert. Try again.</p>}
+        </div>
       ) : (
         <div className="director-resource-add-row">
           {(["image", "audio", "video"] as ReferenceKind[]).map((kind) => (

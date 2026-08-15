@@ -26,7 +26,7 @@ from generation.resolution import ASPECT_RATIO_VALUES, DEFAULT_ASPECT_RATIO, com
 from integrations import assembly, comfyui, llm
 
 from . import services
-from .models import CONTINUATION_CAPABLE_MODES, Clip, ClipReferenceAsset, Project, ProjectResource
+from .models import CONTINUATION_CAPABLE_MODES, Clip, ClipReferenceAsset, JobProjectTag, Project, ProjectResource
 
 
 class ErrorResponseSerializer(serializers.Serializer):
@@ -107,6 +107,14 @@ class ProjectDetailSerializer(ProjectSerializer):
     )
 
 
+class JobMembershipSerializer(serializers.Serializer):
+    job_id = serializers.IntegerField()
+    project_id = serializers.IntegerField()
+    project_title = serializers.CharField(
+        allow_blank=True, help_text="May be blank -- a Director project's own title is optional."
+    )
+
+
 class PlannedSceneSerializer(serializers.Serializer):
     mode = serializers.ChoiceField(choices=Mode.choices)
     continues_previous = serializers.BooleanField()
@@ -142,6 +150,19 @@ class ApplyPlanRequestSerializer(serializers.Serializer):
         help_text="The script/idea text these scenes were generated from, if any -- saved onto "
         "the project as Project.script_text for later review, purely informational.",
     )
+
+
+class ReferenceCandidateSerializer(serializers.Serializer):
+    name = serializers.CharField(help_text="Short human label, e.g. \"Mara\" or \"Mara's voice\".")
+    kind = serializers.ChoiceField(choices=["image", "audio"])
+    description = serializers.CharField(
+        help_text="Ready-to-use t2i (kind=image) or t2a (kind=audio) generation prompt for this "
+        "one reference asset -- submit verbatim as a job's raw_prompt."
+    )
+
+
+class ExtractReferencesResponseSerializer(serializers.Serializer):
+    candidates = ReferenceCandidateSerializer(many=True)
 
 
 class ContinuityCheckResponseSerializer(serializers.Serializer):
@@ -283,6 +304,53 @@ def projects(request):
 
 
 @extend_schema(
+    summary="Which Director project each of the user's jobs belongs to, if any",
+    description="Every GenerationJob ever created under one of the user's Director projects, as "
+    "{job_id, project_id, project_title} rows -- backed by JobProjectTag, a permanent record set "
+    "once when the job is created (see director/services.py's _build_job_for_clip()/"
+    "create_project_from_job()) that outlives the job being superseded by a later re-render, "
+    "unlike Clip.current_job (a single 'latest render' pointer that moves on and leaves the "
+    "previous job looking like an untagged standalone one). Lets the main Generate page's "
+    "queue/history show 'part of <project>' for a job that started inside Director, or offer "
+    "'Create Director project' for a standalone one that isn't in this list. Kept as its own "
+    "endpoint (rather than a field on GenerationJobSerializer) so the generation app never has to "
+    "import anything from director -- see director/models.py's own layering note.",
+    responses=JobMembershipSerializer(many=True),
+    tags=["director"],
+)
+@api_view(["GET"])
+def job_memberships(request):
+    rows = JobProjectTag.objects.filter(project__user=request.user).values(
+        "job_id", "project_id", "project__title"
+    )
+    return Response(
+        [
+            {"job_id": r["job_id"], "project_id": r["project_id"], "project_title": r["project__title"]}
+            for r in rows
+        ]
+    )
+
+
+@extend_schema(
+    summary="Create a new Director project from an existing standalone job",
+    description="Wraps an already-rendered job from the main Generate page as a new project's "
+    "first clip -- reuses the existing render rather than queuing a new one. Only works for a "
+    "successfully finished video-mode (t2v/i2v/r2v) job that isn't already part of a Director "
+    "project (see job_memberships/ to check first).",
+    responses={201: ProjectDetailSerializer, 400: ErrorResponseSerializer, 404: OpenApiResponse(description="Not found.")},
+    tags=["director"],
+)
+@api_view(["POST"])
+def create_project_from_job(request, job_id: int):
+    job = get_object_or_404(GenerationJob, id=job_id, user=request.user)
+    try:
+        project = services.create_project_from_job(job)
+    except services.PlanError as exc:
+        return Response({"error": str(exc)}, status=400)
+    return Response(_serialize_project(project, detail=True), status=201)
+
+
+@extend_schema(
     methods=["GET"],
     summary="Get a Director project (with its resources and clips)",
     responses={200: ProjectDetailSerializer, 404: OpenApiResponse(description="Not found.")},
@@ -300,6 +368,12 @@ def projects(request):
 @extend_schema(
     methods=["DELETE"],
     summary="Delete a Director project",
+    description="Cleans up every file involved (clip/resource references, the project's own "
+    "assembled export) before the row-level cascade removes the database rows. Pass "
+    "delete_related_jobs=true to also delete every GenerationJob ever rendered under this "
+    "project (see JobProjectTag) -- off by default, so those renders survive as ordinary "
+    "untagged jobs in the main Generate page rather than being destroyed along with the project "
+    "wrapper. A job currently queued/processing is never deleted either way.",
     responses={204: OpenApiResponse(description="Deleted."), 404: OpenApiResponse(description="Not found.")},
     tags=["director"],
 )
@@ -308,7 +382,8 @@ def project_detail(request, project_id: int):
     project = _get_project(request, project_id)
 
     if request.method == "DELETE":
-        project.delete()
+        delete_related_jobs = str(request.data.get("delete_related_jobs", "")).lower() in ("1", "true", "yes", "on")
+        services.delete_project(project, delete_related_jobs=delete_related_jobs)
         return Response(status=204)
 
     if request.method == "PATCH":
@@ -413,6 +488,26 @@ def project_resources(request, project_id: int):
     services.renumber_clip_reference_tokens(project, kind, old_count, old_count + 1)
     services.mark_project_dirty(project)
     return Response(_serialize_resource(resource), status=201)
+
+
+@extend_schema(
+    summary="Convert every non-reference clip in a project to reference-to-video mode",
+    description="Switches every t2v/i2v clip to r2v in place (no clip is deleted, and no "
+    "existing clip reference is dropped -- r2v's own per-kind reference limits are >= every "
+    "other mode's) and marks the whole project dirty. Lets a project with existing clips start "
+    "using shared references without deleting them first, since POST resources/ otherwise "
+    "rejects adding one while any non-reference clip exists.",
+    responses={200: ClipSerializer(many=True), 400: ErrorResponseSerializer, 404: OpenApiResponse(description="Not found.")},
+    tags=["director"],
+)
+@api_view(["POST"])
+def convert_to_reference(request, project_id: int):
+    project = _get_project(request, project_id)
+    try:
+        services.convert_clips_to_reference(project)
+    except services.PlanError as exc:
+        return Response({"error": str(exc)}, status=400)
+    return Response([_serialize_clip(c) for c in project.clips.order_by("order")])
 
 
 @extend_schema(
@@ -712,6 +807,30 @@ def clip_reference_detail(request, reference_id: int):
 
 
 @extend_schema(
+    summary="Split a clip into two, chained via continues_previous",
+    description="Inserts a new clip immediately after this one, continuing directly from it -- "
+    "for a scene whose prompt tries to cover too much at once. The new clip starts as a copy of "
+    "this clip's own prompt (pare each half down to its own beat) and inherits this clip's own "
+    "duration/width/height, per MiniMax H3's continuity model. Every later clip's position shifts "
+    "by one; if the clip that used to sit immediately after this one continues_previous, it's "
+    "dirtied too, since what it positionally continues from has changed.",
+    responses={201: ClipSerializer(many=True), 400: ErrorResponseSerializer, 404: OpenApiResponse(description="Not found.")},
+    tags=["director"],
+)
+@api_view(["POST"])
+def split_clip(request, clip_id: int):
+    clip = _get_clip(request, clip_id)
+    try:
+        services.split_clip(clip)
+    except services.PlanError as exc:
+        return Response({"error": str(exc)}, status=400)
+    return Response(
+        [_serialize_clip(c) for c in Clip.objects.filter(project_id=clip.project_id).order_by("order")],
+        status=201,
+    )
+
+
+@extend_schema(
     summary="Reorder a clip within its project",
     description="Renumbers every sibling clip and always dirties the moved clip -- chain "
     "semantics are positional (continues_previous means 'continue from whichever clip is now "
@@ -928,6 +1047,43 @@ def plan_project(request, project_id: int):
     if not scenes:
         return Response({"error": "The AI didn't return any usable scenes -- try rephrasing."}, status=502)
     return Response({"scenes": scenes})
+
+
+@extend_schema(
+    summary="Suggest character/object/voice reference assets worth generating from a script/idea",
+    description="Reads a script/idea and proposes recurring subjects (characters, objects, "
+    "voices) that would benefit from a fixed reference image/audio sample, each with a "
+    "ready-to-use generation prompt -- preview only, nothing is generated or created yet. "
+    "Meant to run before plan/: attaching the resulting references first lets plan/ write every "
+    "scene as a reference clip that draws on them, instead of re-describing the same subject "
+    "from scratch (and inconsistently) in every scene's text.",
+    request=PlanRequestSerializer,
+    responses={
+        200: ExtractReferencesResponseSerializer,
+        400: ErrorResponseSerializer,
+        404: OpenApiResponse(description="Not found."),
+        502: OpenApiResponse(ErrorResponseSerializer, description="The LLM request itself failed."),
+        503: OpenApiResponse(ErrorResponseSerializer, description="No LLM is configured."),
+    },
+    tags=["director"],
+)
+@api_view(["POST"])
+def extract_references(request, project_id: int):
+    project = _get_project(request, project_id)
+    if not settings.LLM_ENABLED:
+        return Response({"error": "No LLM is configured."}, status=503)
+
+    idea_text = request.data.get("idea_text", "")
+    if not idea_text.strip():
+        return Response({"error": "idea_text is required."}, status=400)
+
+    try:
+        raw_candidates = llm.extract_reference_subjects(idea_text, extra_context=project.overarching_prompt)
+    except llm.LLMError as exc:
+        return Response({"error": str(exc)}, status=502)
+
+    candidates = services.normalize_reference_candidates(raw_candidates)
+    return Response({"candidates": candidates})
 
 
 @extend_schema(

@@ -1,5 +1,7 @@
 import { useEffect, useState, type KeyboardEvent } from "react";
-import { useCancelJob, useDeleteJob, useJob, useUpdateJobTitle } from "../../api/queries";
+import { useNavigate } from "react-router-dom";
+import { useCancelJob, useDeleteJob, useJob, useUpdateJob } from "../../api/queries";
+import { useCreateProjectFromJob, useJobMemberships } from "../../api/directorQueries";
 import { MODE_LABELS, type GenerationJobDetail } from "../../api/types";
 import { displayTitle } from "./jobTitle";
 import { JobProgressBar } from "./JobProgressBar";
@@ -39,10 +41,13 @@ interface JobModalProps {
 }
 
 export function JobModal({ jobId, onClose, onRedo }: JobModalProps) {
+  const navigate = useNavigate();
   const job = useJob(jobId);
   const deleteJob = useDeleteJob();
   const cancelJob = useCancelJob();
-  const updateTitle = useUpdateJobTitle();
+  const updateJob = useUpdateJob();
+  const jobMemberships = useJobMemberships();
+  const createProjectFromJob = useCreateProjectFromJob();
   const [showAiPrompt, setShowAiPrompt] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
@@ -65,6 +70,20 @@ export function JobModal({ jobId, onClose, onRedo }: JobModalProps) {
     await cancelJob.mutateAsync(jobId);
   }
 
+  async function handleCreateProject() {
+    const project = await createProjectFromJob.mutateAsync(jobId);
+    onClose();
+    navigate(`/director/${project.id}`);
+  }
+
+  const directorMembership = jobMemberships.data?.find((m) => m.job_id === jobId);
+  // Mirrors backend director/services.py's create_project_from_job() own
+  // eligibility check (video-mode, successfully finished) -- content_type
+  // "video" is exactly Director's own t2v/i2v/r2v mode set, see
+  // generation/models.py's CONTENT_TYPE_BY_MODE.
+  const canCreateDirectorProject =
+    job.data?.content_type === "video" && job.data.status === "done" && !!job.data.video_url;
+
   function startEditingTitle() {
     if (!job.data) return;
     setTitleDraft(displayTitle(job.data));
@@ -74,7 +93,17 @@ export function JobModal({ jobId, onClose, onRedo }: JobModalProps) {
   async function saveTitle() {
     setEditingTitle(false);
     if (!job.data || titleDraft.trim() === job.data.title.trim()) return;
-    await updateTitle.mutateAsync({ jobId, title: titleDraft.trim() });
+    await updateJob.mutateAsync({ jobId, title: titleDraft.trim() });
+  }
+
+  function toggleFavorite() {
+    if (!job.data) return;
+    updateJob.mutate({ jobId, isFavorite: !job.data.is_favorite });
+  }
+
+  function toggleArchived() {
+    if (!job.data) return;
+    updateJob.mutate({ jobId, isArchived: !job.data.is_archived });
   }
 
   function handleTitleKeyDown(e: KeyboardEvent<HTMLInputElement>) {
@@ -114,7 +143,19 @@ export function JobModal({ jobId, onClose, onRedo }: JobModalProps) {
                 {displayTitle(job.data)}
               </h2>
             )}
-            <p className="hint modal-mode-label">{MODE_LABELS[job.data.mode]}</p>
+            <p className="hint modal-mode-label">
+              {MODE_LABELS[job.data.mode]}
+              <button
+                type="button"
+                className="link-button job-favorite-toggle"
+                onClick={toggleFavorite}
+                aria-pressed={job.data.is_favorite}
+                title={job.data.is_favorite ? "Remove from favorites" : "Add to favorites"}
+              >
+                <span aria-hidden="true">{job.data.is_favorite ? "♥" : "♡"}</span>
+              </button>
+              {job.data.is_archived && <span className="hint"> — Archived</span>}
+            </p>
 
             {job.data.status === "done" && job.data.video_url ? (
               job.data.content_type === "video" ? (
@@ -167,6 +208,20 @@ export function JobModal({ jobId, onClose, onRedo }: JobModalProps) {
               <dd>{resolutionLabel(job.data)}</dd>
               <dt>Render time</dt>
               <dd>{renderTimeLabel(job.data)}</dd>
+              {directorMembership && (
+                <>
+                  <dt>Director project</dt>
+                  <dd>
+                    <button
+                      type="button"
+                      className="link-button"
+                      onClick={() => navigate(`/director/${directorMembership.project_id}`)}
+                    >
+                      {directorMembership.project_title || "Untitled project"}
+                    </button>
+                  </dd>
+                </>
+              )}
             </dl>
 
             <div className="modal-actions">
@@ -178,6 +233,19 @@ export function JobModal({ jobId, onClose, onRedo }: JobModalProps) {
               <button type="button" onClick={() => onRedo(job.data)}>
                 <span aria-hidden="true">↻</span> Redo
               </button>
+              <button type="button" onClick={toggleArchived}>
+                <span aria-hidden="true">🗄</span> {job.data.is_archived ? "Unarchive" : "Archive"}
+              </button>
+              {canCreateDirectorProject && !directorMembership && (
+                <button
+                  type="button"
+                  onClick={() => void handleCreateProject()}
+                  disabled={createProjectFromJob.isPending}
+                  title="Starts a new Director project with this already-rendered clip as its first scene -- no re-render needed."
+                >
+                  {createProjectFromJob.isPending ? "Creating…" : "Create Director project"}
+                </button>
+              )}
               {(job.data.status === "queued" || job.data.status === "processing") && (
                 <button
                   type="button"
@@ -222,6 +290,7 @@ export function JobModal({ jobId, onClose, onRedo }: JobModalProps) {
             </div>
             {deleteJob.isError && <p className="error">Couldn't delete that job. Try again.</p>}
             {cancelJob.isError && <p className="error">Couldn't cancel that job. Try again.</p>}
+            {createProjectFromJob.isError && <p className="error">Couldn't create a project from this job. Try again.</p>}
           </>
         )}
       </div>

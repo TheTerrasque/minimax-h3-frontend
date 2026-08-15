@@ -12,13 +12,14 @@ import uuid
 
 from django.core.files.base import ContentFile
 from django.db import transaction
+from django.db.models import F
 from django_q.tasks import async_task
 
 from generation.models import GenerationJob, Mode, ReferenceAsset, RenderDuration, RenderPreset
 from generation.resolution import compute_resolution
 from integrations import media_post, motion_context
 
-from .models import CONTINUATION_CAPABLE_MODES, Clip, Project, ProjectResource
+from .models import CONTINUATION_CAPABLE_MODES, Clip, ClipReferenceAsset, JobProjectTag, Project, ProjectResource
 
 # The only modes Director ever creates clips in -- shared by clips()/
 # apply_planned_scenes()'s quality-tier lookups below (RenderPreset rows
@@ -416,6 +417,10 @@ def _build_job_for_clip(clip: Clip) -> GenerationJob:
         estimated_seconds=clip.duration.estimated_render_seconds,
         continuation_params=chain_params,
     )
+    # Permanent, unlike clip.current_job below -- see JobProjectTag's own
+    # docstring on why this needs to survive a later re-render reassigning
+    # current_job to some other, newer job.
+    JobProjectTag.objects.create(job=job, project=clip.project)
 
     references = _combined_references(clip)
     if anchor_frame is not None:
@@ -548,11 +553,249 @@ def mark_dirty_cascade(clip: Clip) -> None:
         next_clip.save(update_fields=["needs_render"])
 
 
+def split_clip(clip: Clip) -> Clip:
+    """Inserts a brand-new Clip immediately after `clip`, continuing
+    directly from it (continues_previous=True) -- backs the board's
+    "Split" action for a scene whose prompt tries to cram too much into
+    one beat (see DIRECTOR_PLAN_GUIDE_en.md's own chaining-over-cramming
+    advice). Only does the structural half: position, mode, and the
+    duration/width/height lock a continuing Clip always needs (see
+    resolve_clip_width_height()/resolve_clip_duration()'s docstrings) --
+    the new Clip starts as a copy of `clip`'s own prompt text, left for
+    the user (or a subsequent AI refine/chat pass) to pare each half down
+    to its own beat, since actually dividing the prose itself needs real
+    language understanding this module doesn't have.
+
+    Mode for the new Clip: r2v if the project has shared resources (every
+    Clip must be r2v then, same rule project_resources() enforces
+    elsewhere), `clip`'s own mode if that's already continuation-capable
+    (the common case -- splitting a Clip that's already part of a chain
+    should stay on the same mode), otherwise i2v -- the default "continue
+    the previous shot" mode per the plan guide.
+
+    Renumbers every later Clip's `order` up by one to make room -- safe
+    against Clip's own deferred unique-together (project, order)
+    constraint the same way reorder_clip() is, since it's only checked at
+    commit. If the Clip that used to sit immediately after `clip` has
+    continues_previous set, it's cascade-dirtied too: continues_previous
+    is positional (see Clip's own docstring), so it now continues from
+    the new Clip instead of `clip` -- a real change to what its render
+    actually needs to match, not just a cosmetic renumbering.
+    """
+    project = clip.project
+    if project_requires_reference_mode(project):
+        mode = Mode.REFERENCE_TO_VIDEO
+    elif clip.mode in CONTINUATION_CAPABLE_MODES:
+        mode = clip.mode
+    else:
+        mode = Mode.IMAGE_TO_VIDEO
+
+    preset = resolve_preset_for_mode(project.quality_label, mode)
+    if preset is None:
+        raise PlanError(f"No active render preset/duration is configured for mode {mode!r}.")
+
+    with transaction.atomic():
+        old_successor = Clip.objects.filter(project_id=project.id, order=clip.order + 1).first()
+
+        Clip.objects.filter(project_id=project.id, order__gt=clip.order).update(order=F("order") + 1)
+
+        new_clip = Clip.objects.create(
+            project=project,
+            order=clip.order + 1,
+            continues_previous=True,
+            mode=mode,
+            prompt=clip.prompt,
+            preset=preset,
+            duration=clip.duration,
+            width=clip.width,
+            height=clip.height,
+        )
+
+        if old_successor is not None and old_successor.continues_previous:
+            # Refreshed first -- the bulk update above already moved this
+            # row's real `order` on by one, but this Python object still
+            # holds its pre-shift value, and mark_dirty_cascade() needs the
+            # real one to find the right clips to cascade through.
+            old_successor.refresh_from_db()
+            mark_dirty_cascade(old_successor)
+
+    return new_clip
+
+
+def create_project_from_job(job: GenerationJob) -> Project:
+    """Wraps an already-rendered, standalone GenerationJob (from the main
+    Generate page) as a brand-new Director project with that job as its
+    first, already-clean Clip -- backs "Create Director project" on a
+    standalone job in the queue/history. Reuses the existing render
+    outright (current_job=job, needs_render=False) rather than queuing a
+    new one: the whole point is not to throw away an already-good render
+    just because it didn't start inside Director.
+
+    Raises PlanError if `job` can't become a Director clip: its mode
+    isn't one of Director's own video modes (_VIDEO_MODES -- image/audio
+    jobs have no place on a video timeline), it hasn't successfully
+    finished, or it already belongs to some other Clip as current_job
+    (see Clip.current_job's related_name="director_clip" -- a job already
+    on a board shouldn't silently get a second, disconnected Clip made
+    from it; director/api.py's own view surfaces the project it already
+    belongs to instead of offering this action once that's true).
+
+    The new Clip's chain_run_name/chain_scene_number are deliberately left
+    blank -- `job` was never rendered through Director's chain-aware path
+    (see _resolve_chain_params()), so there's no real ComfyUI checkpoint
+    to name. A later Clip continuing from this one naturally falls back to
+    the last-frame-image method instead of true motion continuity, same
+    as for any other predecessor with no real checkpoint of its own -- see
+    _build_job_for_clip()'s own "Graceful fallback" paragraph.
+    """
+    if job.mode not in _VIDEO_MODES:
+        raise PlanError(f"{Mode(job.mode).label} jobs can't become a Director clip -- only video modes can.")
+    if job.status != GenerationJob.Status.DONE or job.error_message or not job.video_file:
+        raise PlanError("Only a successfully finished render can become a Director clip.")
+    if job.director_clip.exists():
+        raise PlanError("This job already belongs to a Director project.")
+
+    with transaction.atomic():
+        project = Project.objects.create(
+            user=job.user,
+            title=job.title.strip() or job.raw_prompt.strip()[:80],
+            aspect_ratio=job.aspect_ratio,
+            quality_label=job.preset.label,
+        )
+        clip = Clip.objects.create(
+            project=project,
+            order=0,
+            continues_previous=False,
+            mode=job.mode,
+            prompt=job.raw_prompt,
+            improved_prompt=job.improved_prompt,
+            preset=job.preset,
+            duration=job.duration,
+            width=job.width,
+            height=job.height,
+            needs_render=False,
+            current_job=job,
+        )
+        for ref in job.references.order_by("kind", "order"):
+            ref.file.open("rb")
+            try:
+                content = ref.file.read()
+            finally:
+                ref.file.close()
+            new_ref = ClipReferenceAsset(clip=clip, kind=ref.kind, order=ref.order)
+            new_ref.file.save(ref.file.name.rsplit("/", 1)[-1], ContentFile(content), save=True)
+
+        # Same permanent record _build_job_for_clip() creates for a normal
+        # render -- see JobProjectTag's own docstring. Without this, `job`
+        # would only be tagged for as long as it stays this clip's
+        # current_job, same gap this whole model exists to close.
+        JobProjectTag.objects.create(job=job, project=project)
+
+    return project
+
+
+def delete_project(project: Project, *, delete_related_jobs: bool = False) -> None:
+    """Deletes `project` and everything under it, cleaning up the actual
+    files first -- Project.delete()'s own cascade (Clip/ClipReferenceAsset/
+    ProjectResource/JobProjectTag rows) only removes database rows, not
+    the files those rows point at, the same gap clip_detail()'s/
+    resource_detail()'s own single-item DELETE handlers already work
+    around by deleting a file before its row.
+
+    delete_related_jobs: also deletes every GenerationJob ever tagged to
+    this project (see JobProjectTag), including their own video/thumbnail/
+    reference files. Off by default -- create_project_from_job()'s whole
+    premise is "reuse a render, don't waste it," so the symmetric default
+    here is to let a project's renders outlive it as ordinary untagged
+    jobs in the main Generate page, not silently destroy something the
+    user might still want just because its project wrapper is gone. A
+    job that's currently queued/processing is never deleted regardless of
+    this flag -- same guard generation/api.py's own job_detail() DELETE
+    applies, just skipped here rather than failing the whole request.
+    """
+    if project.assembled_video_file:
+        project.assembled_video_file.delete(save=False)
+
+    for resource in project.resources.all():
+        resource.file.delete(save=False)
+
+    for clip in project.clips.all():
+        for ref in clip.references.all():
+            ref.file.delete(save=False)
+
+    if delete_related_jobs:
+        active_statuses = {GenerationJob.Status.QUEUED, GenerationJob.Status.PROCESSING}
+        jobs = GenerationJob.objects.filter(director_project_tag__project=project).exclude(status__in=active_statuses)
+        for job in jobs:
+            for ref in job.references.all():
+                ref.file.delete(save=False)
+            if job.video_file:
+                job.video_file.delete(save=False)
+            if job.thumbnail_file:
+                job.thumbnail_file.delete(save=False)
+        jobs.delete()
+
+    project.delete()
+
+
 def mark_project_dirty(project: Project) -> None:
     """Every Clip's render depends on Project.overarching_prompt/resources,
     so changing either invalidates the whole project, not just a cascade
     from one point."""
     project.clips.update(needs_render=True)
+
+
+def convert_clips_to_reference(project: Project) -> int:
+    """Switches every t2v/i2v Clip in `project` to mode=r2v, in place --
+    lets a project with existing clips add shared references without
+    deleting them first, since project_resources() otherwise rejects
+    adding one while any non-reference Clip exists. Returns how many
+    Clips were actually converted (0 leaves the project untouched and
+    doesn't dirty anything).
+
+    Never loses a Clip's own references: r2v's own per-kind limits
+    (generation/api.py's _MAX_REFERENCE_IMAGES/_MAX_REFERENCE_AUDIO/
+    _MAX_REFERENCE_VIDEO) are >= every other mode's, so whatever a Clip
+    already had under its old mode always still fits. What *does* change
+    is meaning, not content: an i2v Clip's own image reference was
+    implicitly "the first frame"; after conversion it's just this Clip's
+    first r2v reference, addressable as a <Picture N> token in its
+    prompt like any other -- existing prompt text isn't rewritten to add
+    that token, so a converted Clip may need a manual prompt touch-up to
+    actually reference it again.
+
+    Processes Clips in `order` and threads each one's own (possibly just-
+    recomputed) width/height/duration into the next as `predecessor`, same
+    as recompute_project_resolutions() -- required for continues_previous
+    locking to see correct values when the clip immediately before it was
+    itself converted earlier in this same pass.
+    """
+    preset = resolve_preset_for_mode(project.quality_label, Mode.REFERENCE_TO_VIDEO)
+    if preset is None or not preset.durations.filter(is_active=True).exists():
+        raise PlanError("No active render preset/duration is configured for reference clips.")
+
+    converted = 0
+    predecessor: Clip | None = None
+    with transaction.atomic():
+        for clip in project.clips.order_by("order").select_related("preset", "duration"):
+            if clip.mode != Mode.REFERENCE_TO_VIDEO:
+                clip.mode = Mode.REFERENCE_TO_VIDEO
+                clip.preset = preset
+                if clip.continues_previous and predecessor is not None:
+                    clip.duration = predecessor.duration
+                    clip.width, clip.height = predecessor.width, predecessor.height
+                else:
+                    clip.duration = (
+                        _nearest_duration(preset, clip.duration.duration_seconds)
+                        or preset.durations.filter(is_active=True).first()
+                    )
+                    clip.width, clip.height = compute_resolution(preset.megapixels, project.aspect_ratio)
+                clip.save(update_fields=["mode", "preset", "duration", "width", "height"])
+                converted += 1
+            predecessor = clip
+        if converted:
+            mark_project_dirty(project)
+    return converted
 
 
 def normalize_planned_scenes(raw_scenes, *, require_reference_mode: bool = False) -> list[dict]:
@@ -606,6 +849,31 @@ def normalize_planned_scenes(raw_scenes, *, require_reference_mode: bool = False
             }
         )
     return scenes
+
+
+def normalize_reference_candidates(raw_candidates) -> list[dict]:
+    """Coerces integrations.llm.extract_reference_subjects()'s raw reply into
+    the shape director/api.py's extract_references() response and the
+    frontend's per-candidate "generate" step expect:
+    [{"name": str, "kind": "image" | "audio", "description": str}, ...].
+
+    Same posture as normalize_planned_scenes() -- the LLM's JSON is
+    untrusted input, not a contract: silently drops an entry with no
+    usable description (nothing to generate from) and falls back
+    "image" for an unrecognized/missing kind rather than failing the
+    whole list over one malformed entry.
+    """
+    candidates = []
+    for raw in raw_candidates if isinstance(raw_candidates, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        description = str(raw.get("description", "")).strip()
+        if not description:
+            continue
+        name = str(raw.get("name", "")).strip() or "Untitled reference"
+        kind = raw.get("kind") if raw.get("kind") in ("image", "audio") else "image"
+        candidates.append({"name": name, "kind": kind, "description": description})
+    return candidates
 
 
 def apply_planned_scenes(project: Project, scenes, *, replace: bool) -> list[Clip]:

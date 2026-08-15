@@ -140,14 +140,34 @@ export function useCancelJob() {
   });
 }
 
-export function useUpdateJobTitle() {
+// Covers every PATCH-able field on a job (title, is_favorite, is_archived
+// -- see backend generation/api.py's job_detail() PATCH) in one hook,
+// rather than one hook per field: all three are simple independent flips
+// on the same row, so a single mutation with an all-optional payload
+// keeps JobModal/QueueSidebar from juggling three near-identical hooks.
+export function useUpdateJob() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ jobId, title }: { jobId: number; title: string }) =>
-      apiFetch<GenerationJobDetail>(`/jobs/${jobId}/`, {
+    mutationFn: ({
+      jobId,
+      title,
+      isFavorite,
+      isArchived,
+    }: {
+      jobId: number;
+      title?: string;
+      isFavorite?: boolean;
+      isArchived?: boolean;
+    }) => {
+      const body: Record<string, unknown> = {};
+      if (title !== undefined) body.title = title;
+      if (isFavorite !== undefined) body.is_favorite = isFavorite;
+      if (isArchived !== undefined) body.is_archived = isArchived;
+      return apiFetch<GenerationJobDetail>(`/jobs/${jobId}/`, {
         method: "PATCH",
-        body: JSON.stringify({ title }),
-      }),
+        body: JSON.stringify(body),
+      });
+    },
     onSuccess: (_data, { jobId }) => {
       void queryClient.invalidateQueries({ queryKey: ["jobs"] });
       void queryClient.invalidateQueries({ queryKey: ["job", jobId] });

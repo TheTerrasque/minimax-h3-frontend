@@ -73,9 +73,60 @@ export function ProjectListScreen() {
   );
 }
 
-function ProjectCard({ project, onOpen }: { project: Project; onOpen: () => void }) {
+function DeleteProjectModal({ project, onClose }: { project: Project; onClose: () => void }) {
   const deleteProject = useDeleteDirectorProject();
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleteRelatedJobs, setDeleteRelatedJobs] = useState(false);
+
+  async function handleDelete() {
+    await deleteProject.mutateAsync({ projectId: project.id, deleteRelatedJobs });
+    onClose();
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <button type="button" className="modal-close" onClick={onClose} aria-label="Close">
+          ×
+        </button>
+        <h2>Delete project?</h2>
+        <p className="hint">
+          "{project.title || `Project ${project.id}`}" and its clips will be removed. This can't be
+          undone.
+        </p>
+        <label className="clip-editor-continues-toggle">
+          <input
+            type="checkbox"
+            checked={deleteRelatedJobs}
+            onChange={(e) => setDeleteRelatedJobs(e.target.checked)}
+          />
+          Also delete the rendered videos for this project's clips
+          <span className="hint">
+            {" "}
+            — otherwise they stay in your Generate queue, just no longer tagged to this project. A
+            video that's still queued/processing is never deleted either way.
+          </span>
+        </label>
+        {deleteProject.isError && <p className="error">Couldn't delete that project. Try again.</p>}
+        <div className="modal-actions">
+          <button type="button" onClick={onClose} disabled={deleteProject.isPending}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="button-danger"
+            onClick={() => void handleDelete()}
+            disabled={deleteProject.isPending}
+          >
+            {deleteProject.isPending ? "Deleting…" : "Yes, delete"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ProjectCard({ project, onOpen }: { project: Project; onOpen: () => void }) {
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
 
   const total = project.clip_count ?? 0;
   const dirty = project.dirty_count ?? 0;
@@ -99,44 +150,19 @@ function ProjectCard({ project, onOpen }: { project: Project; onOpen: () => void
       </button>
 
       <div className="director-project-card-actions">
-        {confirmingDelete ? (
-          <>
-            <span className="hint">Delete this project? This can't be undone.</span>
-            <button
-              type="button"
-              className="button-danger"
-              onClick={(e) => {
-                e.stopPropagation();
-                deleteProject.mutate(project.id);
-              }}
-              disabled={deleteProject.isPending}
-            >
-              {deleteProject.isPending ? "Deleting…" : "Yes, delete"}
-            </button>
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                setConfirmingDelete(false);
-              }}
-            >
-              Cancel
-            </button>
-          </>
-        ) : (
-          <button
-            type="button"
-            className="link-button"
-            onClick={(e) => {
-              e.stopPropagation();
-              setConfirmingDelete(true);
-            }}
-          >
-            Delete
-          </button>
-        )}
+        <button
+          type="button"
+          className="link-button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setDeleteModalOpen(true);
+          }}
+        >
+          Delete
+        </button>
       </div>
-      {deleteProject.isError && <p className="error">Couldn't delete that project. Try again.</p>}
+
+      {deleteModalOpen && <DeleteProjectModal project={project} onClose={() => setDeleteModalOpen(false)} />}
     </li>
   );
 }

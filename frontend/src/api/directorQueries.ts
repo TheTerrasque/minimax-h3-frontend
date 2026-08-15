@@ -4,7 +4,16 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "./client";
-import type { Clip, ClipReference, PlannedScene, Project, ProjectDetail, ProjectResource } from "./directorTypes";
+import type {
+  Clip,
+  ClipReference,
+  JobMembership,
+  PlannedScene,
+  Project,
+  ProjectDetail,
+  ProjectResource,
+  ReferenceCandidate,
+} from "./directorTypes";
 import type { Mode, ReferenceKind } from "./types";
 
 const ACTIVE_JOB_STATUSES = new Set(["queued", "processing"]);
@@ -33,6 +42,32 @@ export function useDirectorProject(projectId: number | null) {
     // api/queries.ts's useJobs()/useJob(), just keyed off the whole
     // project's clips instead of a single job.
     refetchInterval: (query) => (projectHasActiveClip(query.state.data) ? 4000 : false),
+  });
+}
+
+// Which Director project each of the user's jobs already belongs to, if
+// any -- see backend director/api.py's job_memberships(). Used by the main
+// Generate page's job modal to show "part of <project>" vs. offering
+// "Create Director project" -- see useCreateProjectFromJob() below.
+export function useJobMemberships() {
+  return useQuery({
+    queryKey: ["director-job-memberships"],
+    queryFn: () => apiFetch<JobMembership[]>("/director/job_memberships/"),
+  });
+}
+
+// Wraps an already-rendered, standalone job (from the main Generate page)
+// as a new Director project with that job as its first, already-clean
+// clip -- see backend director/services.py's create_project_from_job().
+// Reuses the existing render rather than queuing a new one.
+export function useCreateProjectFromJob() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (jobId: number) => apiFetch<ProjectDetail>(`/director/from_job/${jobId}/`, { method: "POST" }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["director-projects"] });
+      void queryClient.invalidateQueries({ queryKey: ["director-job-memberships"] });
+    },
   });
 }
 
@@ -96,9 +131,17 @@ export function useUpdateDirectorProject() {
 export function useDeleteDirectorProject() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (projectId: number) => apiFetch<void>(`/director/projects/${projectId}/`, { method: "DELETE" }),
+    mutationFn: ({ projectId, deleteRelatedJobs }: { projectId: number; deleteRelatedJobs?: boolean }) =>
+      apiFetch<void>(`/director/projects/${projectId}/`, {
+        method: "DELETE",
+        body: JSON.stringify({ delete_related_jobs: !!deleteRelatedJobs }),
+      }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["director-projects"] });
+      // A "delete related jobs" deletion removes GenerationJob rows too --
+      // the main Generate page's own lists need to drop them as well.
+      void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      void queryClient.invalidateQueries({ queryKey: ["director-job-memberships"] });
     },
   });
 }
@@ -127,6 +170,22 @@ export function useCreateProjectResource() {
       });
     },
     onSuccess: (_data, { projectId }) => {
+      void queryClient.invalidateQueries({ queryKey: ["director-project", projectId] });
+    },
+  });
+}
+
+// Switches every non-reference clip in a project to r2v, in place -- see
+// backend director/services.py's convert_clips_to_reference(). Lets a
+// project that already has t2v/i2v clips start using shared references
+// without deleting them first (useCreateProjectResource otherwise 400s
+// while any non-reference clip exists).
+export function useConvertToReference() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (projectId: number) =>
+      apiFetch<Clip[]>(`/director/projects/${projectId}/convert_to_reference/`, { method: "POST" }),
+    onSuccess: (_data, projectId) => {
       void queryClient.invalidateQueries({ queryKey: ["director-project", projectId] });
     },
   });
@@ -254,6 +313,21 @@ export function useReorderClip() {
   });
 }
 
+// Inserts a new clip right after this one, continuing directly from it --
+// see backend director/services.py's split_clip(). For a scene whose
+// prompt tries to cover too much in one beat: the new clip starts as a
+// copy of this one's prompt, left to pare down into two separate beats.
+export function useSplitClip() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ clipId }: { projectId: number; clipId: number }) =>
+      apiFetch<Clip[]>(`/director/clips/${clipId}/split/`, { method: "POST" }),
+    onSuccess: (_data, { projectId }) => {
+      void queryClient.invalidateQueries({ queryKey: ["director-project", projectId] });
+    },
+  });
+}
+
 export function useRenderClip() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -328,6 +402,20 @@ export function usePlanFromScript() {
   return useMutation({
     mutationFn: ({ projectId, ideaText }: { projectId: number; ideaText: string }) =>
       apiFetch<{ scenes: PlannedScene[] }>(`/director/projects/${projectId}/plan/`, {
+        method: "POST",
+        body: JSON.stringify({ idea_text: ideaText }),
+      }),
+  });
+}
+
+// "Generate from script"'s reference-suggestion step -- see
+// ScriptPlanModal. Preview-only, same as usePlanFromScript(): nothing is
+// generated or attached until the user clicks "Generate" on an individual
+// candidate (see useCreateJob()/useCreateProjectResource()).
+export function useExtractReferences() {
+  return useMutation({
+    mutationFn: ({ projectId, ideaText }: { projectId: number; ideaText: string }) =>
+      apiFetch<{ candidates: ReferenceCandidate[] }>(`/director/projects/${projectId}/extract_references/`, {
         method: "POST",
         body: JSON.stringify({ idea_text: ideaText }),
       }),

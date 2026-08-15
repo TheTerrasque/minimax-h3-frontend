@@ -197,6 +197,18 @@ class GenerationJob(models.Model):
         "generation/api.py's PATCH job_detail). Blank means the frontend falls back to "
         "showing (a truncated) raw_prompt instead -- see frontend/src/features/queue/jobTitle.ts.",
     )
+    is_favorite = models.BooleanField(
+        default=False,
+        help_text="User-toggled 'hearted' flag for the queue/history list -- purely a display/"
+        "filter aid (see generation/api.py's PATCH job_detail), no effect on rendering.",
+    )
+    is_archived = models.BooleanField(
+        default=False,
+        help_text="Hides this job from the default queue/history view without deleting it -- "
+        "see generation/api.py's PATCH job_detail. The frontend filters this client-side (the "
+        "list endpoint always returns every job, archived or not), same as its other queue "
+        "filters.",
+    )
 
     # Snapshotted at creation from preset/duration/aspect_ratio (see
     # generation/api.py::jobs() and resolution.compute_resolution()) so

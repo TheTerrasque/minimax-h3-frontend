@@ -190,9 +190,16 @@ export interface GenerationJob {
   content_type: ContentType;
   status: JobStatus;
   raw_prompt: string;
-  // User-editable label (see useUpdateJobTitle) -- blank means the frontend
+  // User-editable label (see useUpdateJob) -- blank means the frontend
   // should fall back to raw_prompt, see features/queue/jobTitle.ts.
   title: string;
+  // User-toggled "hearted" flag -- see useUpdateJob(). Purely a display/
+  // filter aid, no effect on rendering.
+  is_favorite: boolean;
+  // Hides this job from the default queue/history view -- see
+  // useUpdateJob(). The list endpoint always returns every job regardless
+  // of this flag; filtering happens client-side (see QueueSidebar).
+  is_archived: boolean;
   preset_id: number;
   // Quality tier label (e.g. "Draft", "Standard") -- RenderPreset.label, read
   // live server-side, see api.py's GenerationJobSerializer.
